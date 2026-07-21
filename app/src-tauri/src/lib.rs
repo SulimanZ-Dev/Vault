@@ -40,6 +40,8 @@ const PLUGINS_MIGRATION: &str = include_str!("../migrations/0022_plugins.sql");
 const GENERAL_NOTES_MIGRATION: &str = include_str!("../migrations/0023_general_notes.sql");
 const ORGANIZER_LOCKS_MIGRATION: &str = include_str!("../migrations/0024_organizer_locks.sql");
 const VIEWER_VERSIONS_MIGRATION: &str = include_str!("../migrations/0025_viewer_versions.sql");
+const BACKUP_DESTINATIONS_MIGRATION: &str =
+    include_str!("../migrations/0026_backup_destinations.sql");
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (1, "initial local vault schema", INITIAL_MIGRATION),
     (
@@ -113,6 +115,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         25,
         "viewer annotations and version history",
         VIEWER_VERSIONS_MIGRATION,
+    ),
+    (
+        26,
+        "backup destinations and safe unlock",
+        BACKUP_DESTINATIONS_MIGRATION,
     ),
 ];
 
@@ -10997,7 +11004,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let status = initialize_vault_at(temp_dir.path()).expect("vault initialization");
 
-        assert_eq!(status.schema_version, 25);
+        assert_eq!(status.schema_version, 26);
         assert_eq!(status.testlab_document_count, 4);
         assert!(status.production_vault_ready);
         assert!(PathBuf::from(status.database_path).exists());

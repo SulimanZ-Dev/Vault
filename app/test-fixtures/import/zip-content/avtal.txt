@@ -1,0 +1,5 @@
+Avtal
+Leverantör: Testbolaget AB
+Startdatum: 2026-08-01
+Slutdatum: 2027-07-31
+Månadskostnad: 199 SEK

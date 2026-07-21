@@ -1,0 +1,16 @@
+{
+  "id": "vault.local.kvitto-taggar",
+  "name": "Lokala kvittotaggar",
+  "version": "1.0.0",
+  "description": "Taggar dokument vars lokala titel eller text innehåller ordet kvitto.",
+  "ai_free": true,
+  "capabilities": ["read_metadata", "read_text", "write_tags"],
+  "data_access": ["metadata", "document_text"],
+  "actions": [
+    {
+      "action_type": "add_tag",
+      "match_text": "kvitto",
+      "value": "Plugin: Kvitto"
+    }
+  ]
+}

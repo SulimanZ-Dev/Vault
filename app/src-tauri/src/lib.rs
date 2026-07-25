@@ -385,6 +385,15 @@ struct DataExportResult {
 }
 
 #[derive(Serialize)]
+struct ProfileImportResult {
+    saved_searches: usize,
+    themes: usize,
+    code_words: usize,
+    rules: usize,
+    dashboard_layout_json: String,
+}
+
+#[derive(Serialize)]
 struct DocumentDetail {
     document: DocumentSummary,
     extracted_text: String,
@@ -5862,6 +5871,81 @@ fn create_data_export_at(
     let hash = sha256_file(&archive_path).map_err(|error| error.to_string())?;
     record_audit_event(&connection, "data_export_created", "export", None, &format!("{format}; {row_count} rows; {file_count} originals")).map_err(|error| error.to_string())?;
     Ok(DataExportResult { export_path: archive_path.to_string_lossy().into_owned(), format: format.into(), table_count: EXPORT_TABLES.len(), row_count, file_count, sha256: Some(hash) })
+}
+
+#[tauri::command]
+fn export_user_profile(
+    app: tauri::AppHandle,
+    dashboard_layout_json: String,
+) -> Result<String, String> {
+    serde_json::from_str::<serde_json::Value>(&dashboard_layout_json)
+        .map_err(|error| format!("Ogiltig dashboardlayout: {error}"))?;
+    let data_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    initialize_vault_at(&data_root).map_err(|error| error.to_string())?;
+    let connection = Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
+    let profile = serde_json::json!({
+        "format": "vault-user-profile",
+        "version": 1,
+        "dashboard_layout": serde_json::from_str::<serde_json::Value>(&dashboard_layout_json).map_err(|error| error.to_string())?,
+        "saved_searches": export_table_rows(&connection, "saved_searches")?,
+        "themes": export_table_rows(&connection, "theme_profiles")?.into_iter().filter(|row| row.get("is_builtin").and_then(|value| value.as_i64()) == Some(0)).collect::<Vec<_>>(),
+        "code_words": export_table_rows(&connection, "code_words")?,
+        "rules": export_table_rows(&connection, "automation_rules")?,
+    });
+    let root = data_root.join("exports");
+    fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    let path = root.join(format!("vault-profil-{}.json", epoch_seconds()));
+    fs::write(&path, serde_json::to_vec_pretty(&profile).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn object_string(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
+    object.get(key).and_then(|value| value.as_str()).unwrap_or_default().to_string()
+}
+
+#[tauri::command]
+fn import_user_profile(app: tauri::AppHandle, path: String) -> Result<ProfileImportResult, String> {
+    let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+    if bytes.len() > 10 * 1024 * 1024 {
+        return Err("Profilfilen är större än 10 MB".into());
+    }
+    let profile: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| format!("Ogiltig profilfil: {error}"))?;
+    if profile["format"] != "vault-user-profile" || profile["version"] != 1 {
+        return Err("Profilformatet eller versionen stöds inte".into());
+    }
+    let layout = profile.get("dashboard_layout").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let data_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    initialize_vault_at(&data_root).map_err(|error| error.to_string())?;
+    let mut connection = Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let searches = profile["saved_searches"].as_array().cloned().unwrap_or_default();
+    for item in &searches {
+        let object = item.as_object().ok_or("Ogiltig sparad sökning")?;
+        transaction.execute("INSERT INTO saved_searches(name,query,pinned) VALUES(?1,?2,?3) ON CONFLICT(name) DO UPDATE SET query=excluded.query,pinned=excluded.pinned,updated_at=CURRENT_TIMESTAMP",
+            params![object_string(object,"name"),object_string(object,"query"),object.get("pinned").and_then(|value|value.as_i64()).unwrap_or(0)]).map_err(|error|error.to_string())?;
+    }
+    let words = profile["code_words"].as_array().cloned().unwrap_or_default();
+    for item in &words {
+        let object = item.as_object().ok_or("Ogiltigt kodord")?;
+        transaction.execute("INSERT INTO code_words(vault_id,word,description) VALUES(1,?1,?2) ON CONFLICT(vault_id,word) DO UPDATE SET description=excluded.description",
+            params![object_string(object,"word"),object_string(object,"description")]).map_err(|error|error.to_string())?;
+    }
+    let rules = profile["rules"].as_array().cloned().unwrap_or_default();
+    for item in &rules {
+        let object = item.as_object().ok_or("Ogiltig regel")?;
+        transaction.execute("INSERT INTO automation_rules(name,enabled,priority,match_field,match_operator,match_value,action_type,action_value,approval_policy,logic_operator,conditions_json,actions_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![format!("{} (importerad)",object_string(object,"name")),object.get("enabled").and_then(|v|v.as_i64()).unwrap_or(0),object.get("priority").and_then(|v|v.as_i64()).unwrap_or(100),object_string(object,"match_field"),object_string(object,"match_operator"),object_string(object,"match_value"),object_string(object,"action_type"),object_string(object,"action_value"),object_string(object,"approval_policy"),object_string(object,"logic_operator"),object_string(object,"conditions_json"),object_string(object,"actions_json")]).map_err(|error|error.to_string())?;
+    }
+    let themes = profile["themes"].as_array().cloned().unwrap_or_default();
+    for item in &themes {
+        let object = item.as_object().ok_or("Ogiltigt tema")?;
+        transaction.execute("INSERT INTO theme_profiles(name,base_mode,accent,surface_main,surface_sidebar,surface_raised,text_primary,text_secondary,border_color,radius_px,font_scale,density,motion,is_builtin,is_active) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,0) ON CONFLICT(name) DO NOTHING",
+            params![format!("{} (importerat)",object_string(object,"name")),object_string(object,"base_mode"),object_string(object,"accent"),object_string(object,"surface_main"),object_string(object,"surface_sidebar"),object_string(object,"surface_raised"),object_string(object,"text_primary"),object_string(object,"text_secondary"),object_string(object,"border_color"),object.get("radius_px").and_then(|v|v.as_i64()).unwrap_or(12),object.get("font_scale").and_then(|v|v.as_f64()).unwrap_or(1.0),object_string(object,"density"),object_string(object,"motion")]).map_err(|error|error.to_string())?;
+    }
+    record_audit_event(&transaction, "user_profile_imported", "settings", None, &format!("{} searches; {} themes; {} code words; {} rules", searches.len(), themes.len(), words.len(), rules.len())).map_err(|error|error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(ProfileImportResult { saved_searches: searches.len(), themes: themes.len(), code_words: words.len(), rules: rules.len(), dashboard_layout_json: layout.to_string() })
 }
 
 #[tauri::command]
@@ -11729,6 +11813,8 @@ pub fn run() {
             test_backup_restore,
             create_portable_archive,
             create_data_export,
+            export_user_profile,
+            import_user_profile,
             restore_portable_archive,
             scan_file_integrity,
             decide_duplicate,

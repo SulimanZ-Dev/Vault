@@ -83,6 +83,7 @@ type SecurityStatus = { mode:string; pin_configured:boolean; auto_lock_minutes:n
 type WindowsHelloStatus = {available:boolean;explanation:string}
 type ProtectedExportResult = { export_path:string; sha256:string; size_bytes:number; masked:boolean }
 type DataExportResult = { export_path:string; format:string; table_count:number; row_count:number; file_count:number; sha256:string|null }
+type ProfileImportResult = { saved_searches:number; themes:number; code_words:number; rules:number; dashboard_layout_json:string }
 
 type DocumentDetail = {
   document: DocumentSummary
@@ -1343,6 +1344,8 @@ function App() {
 
   async function handleCreatePortableArchive(){setBackupError(null);try{setPortableArchive(await invoke('create_portable_archive'))}catch(error){setBackupError(String(error))}}
   async function handleCreateDataExport(){setBackupError(null);try{setDataExport(await invoke('create_data_export',{format:dataExportDraft.format,includeOriginals:dataExportDraft.includeOriginals,folderLayout:dataExportDraft.folderLayout}))}catch(error){setBackupError(String(error))}}
+  async function handleExportUserProfile(){try{const path=await invoke<string>('export_user_profile',{dashboardLayoutJson:JSON.stringify({name:activeDashboardLayout,widgets:dashboardWidgets,sizes:dashboardSizes,layouts:dashboardLayouts})});setBackupError(`Profil exporterad: ${path}`)}catch(error){setBackupError(String(error))}}
+  async function handleImportUserProfile(){const selected=await open({multiple:false,filters:[{name:'Vault-profil',extensions:['json']}],title:'Importera Vault-profil'});if(typeof selected!=='string')return;try{const result=await invoke<ProfileImportResult>('import_user_profile',{path:selected});const layout=JSON.parse(result.dashboard_layout_json);if(Array.isArray(layout.widgets))setDashboardWidgets(layout.widgets);if(layout.sizes&&typeof layout.sizes==='object')setDashboardSizes(layout.sizes);if(Array.isArray(layout.layouts))setDashboardLayouts(layout.layouts);if(typeof layout.name==='string')setActiveDashboardLayout(layout.name);setSavedSearches(await invoke('list_saved_searches'));setThemeProfiles(await invoke('list_theme_profiles'));setCodeWords(await invoke('list_code_words'));setAutomationRules(await invoke('list_automation_rules'));setBackupError(`Profil importerad: ${result.saved_searches} sökningar, ${result.themes} teman, ${result.code_words} kodord och ${result.rules} regler.`)}catch(error){setBackupError(String(error))}}
 
   async function handleRestorePortableArchive(){
     const selected=await open({multiple:false,filters:[{name:'Vault portabelt arkiv',extensions:['vaultarchive']}]})
@@ -2727,6 +2730,7 @@ function App() {
                   <label>Mappstruktur<select value={dataExportDraft.folderLayout} onChange={event=>setDataExportDraft({...dataExportDraft,folderLayout:event.target.value})}><option value="vault">Vault-struktur</option><option value="flat">Platt</option><option value="type">Efter dokumenttyp</option></select></label>
                   <label><input type="checkbox" checked={dataExportDraft.includeOriginals} onChange={event=>setDataExportDraft({...dataExportDraft,includeOriginals:event.target.checked})}/> Inkludera originaldokument</label>
                   <button className="primary-action" onClick={handleCreateDataExport} type="button">Skapa dataexport</button>
+                  <div className="claim-actions"><button className="secondary-action" onClick={handleExportUserProfile} type="button">Exportera användarprofil</button><button className="secondary-action" onClick={handleImportUserProfile} type="button">Importera användarprofil</button></div>
                   {dataExport?<><small className="path-value">{dataExport.export_path}</small><code>{dataExport.row_count} rader · {dataExport.file_count} original · {dataExport.table_count} tabeller</code></>:null}
                 </div>
                 <div className="work-item">

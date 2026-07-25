@@ -28,7 +28,7 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 - [ ] 🔷 Deterministiskt språkstöd för vanliga svenska böjningsformer, sammansättningar, synonymer och OCR-felen 0/o samt 1/l
 - [x] ✅ Kombinerbara filter för dokumenttyp, kategori, arbetsgivare/entitet, status, filformat och datumintervall
 - [x] ✅ Sparade sökningar körs dynamiskt mot aktuellt lokalt arkiv och kan fästas i navigationen
-- [ ] ❌ Import av layout, sökningar, teman, kodord, regler
+- [ ] 🔷 Versionsvaliderad, transaktionell import/export av layout, sökningar, teman, kodord och regler
 
 ## 4. Analys, regler och bakgrundsjobb
 - [x] ✅ Jobb-tabell med status (schema v9)

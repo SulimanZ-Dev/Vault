@@ -667,6 +667,7 @@ function App() {
   const [reminders, setReminders] = useState<ReminderSummary[]>([])
   const [watchedFolders, setWatchedFolders] = useState<WatchedFolderSummary[]>([])
   const [backgroundJobs, setBackgroundJobs] = useState<JobSummary[]>([])
+  const [systemJobType,setSystemJobType]=useState('archive_analysis')
   const [reminderDraft, setReminderDraft] = useState({ title: '', due_date: '', note: '' })
   const [workflowError, setWorkflowError] = useState<string | null>(null)
   const [isAddingVersion, setIsAddingVersion] = useState(false)
@@ -1821,6 +1822,8 @@ function App() {
       setIsScanningFolders(false)
     }
   }
+  async function handleQueueSystemJob(){try{setBackgroundJobs(await invoke('queue_system_job',{jobType:systemJobType}));setWorkflowError(null)}catch(error){setWorkflowError(String(error))}}
+  async function handleControlJob(job:JobSummary,action:string){try{setBackgroundJobs(await invoke('control_background_job',{jobId:job.id,action}));setWorkflowError(null)}catch(error){setWorkflowError(String(error))}}
 
   async function handleSaveRule() {
     try {const conditions=[{field:ruleDraft.match_field,operator:ruleDraft.match_operator,value:ruleDraft.match_value},...(ruleDraft.second_value.trim()?[{field:ruleDraft.second_field,operator:ruleDraft.second_operator,value:ruleDraft.second_value}]:[])];setAutomationRules(await invoke('save_automation_rule',{id:null,name:ruleDraft.name,enabled:true,priority:100,matchField:ruleDraft.match_field,matchOperator:ruleDraft.match_operator,matchValue:ruleDraft.match_value,actionType:ruleDraft.action_type,actionValue:ruleDraft.action_value,approvalPolicy:ruleDraft.approval_policy,logicOperator:ruleDraft.logic_operator,conditionsJson:JSON.stringify(conditions),actionsJson:JSON.stringify([{type:ruleDraft.action_type,value:ruleDraft.action_value}])})); setWorkflowError(null) } catch(e){setWorkflowError(String(e))}
@@ -2613,6 +2616,8 @@ function App() {
                   <button className="primary-action" onClick={handleAddWatchedFolder} type="button">Lägg till mapp</button>
                   <button className="secondary-action" disabled={!watchedFolders.length || isScanningFolders} onClick={handleScanWatchedFolders} type="button">{isScanningFolders ? 'Skannar...' : 'Skanna nu'}</button>
                   <button className="secondary-action" disabled={!watchedFolders.length || isScanningFolders} onClick={handleRunBackgroundJobs} type="button">Kör bakgrundsjobb nu</button>
+                  <select aria-label="Typ av systemjobb" value={systemJobType} onChange={event=>setSystemJobType(event.target.value)}><option value="archive_analysis">Full arkivanalys</option><option value="reindex">Reparera sökindex</option><option value="backup">Lokal backup</option><option value="integrity_scan">Integritetskontroll</option><option value="portable_export">Portabel export</option><option value="dirty_recompute">Uppdatera ändrade dokument</option></select>
+                  <button className="primary-action" onClick={handleQueueSystemJob} type="button">Lägg i beständig kö</button>
                 </div>
                 {workflowError ? <p className="inline-error">{workflowError}</p> : null}
                 <div className="work-panel-grid">
@@ -2626,6 +2631,8 @@ function App() {
                     <div className="work-item" key={job.id}>
                       <strong>{job.job_type}</strong><span>{job.status} · {job.progress_current}/{job.progress_total || '?'} · försök {job.attempts}</span>
                       <small>{job.updated_at}{job.error_code ? ` · ${job.error_code}` : ''}</small>
+                      {job.result_summary?<small>{job.result_summary}</small>:null}
+                      <div className="claim-actions">{['queued','running'].includes(job.status)?<button className="mini-action" onClick={()=>handleControlJob(job,'pause')} type="button">Pausa</button>:null}{job.status==='paused'?<button className="mini-action" onClick={()=>handleControlJob(job,'resume')} type="button">Återuppta</button>:null}{!['completed','cancelled'].includes(job.status)?<button className="mini-action danger-action" onClick={()=>handleControlJob(job,'cancel')} type="button">Avbryt</button>:null}{['failed','cancelled','requires_action'].includes(job.status)?<button className="mini-action" onClick={()=>handleControlJob(job,'retry')} type="button">Försök igen</button>:null}</div>
                     </div>
                   )) : <div className="empty-state">Inga bakgrundsjobb har körts ännu. Automatisk kontroll sker varje minut medan appen är öppen.</div>}
                 </div>

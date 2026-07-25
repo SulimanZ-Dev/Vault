@@ -8440,7 +8440,144 @@ fn run_background_jobs_now(app: tauri::AppHandle) -> Result<Vec<JobSummary>, Str
         .map_err(|error| error.to_string())?;
     initialize_vault_at(&data_root).map_err(|error| error.to_string())?;
     process_watched_folder_job_at(&data_root).map_err(|error| error.to_string())?;
+    while process_next_system_job_at(&data_root).map_err(|error| error.to_string())? {}
+    process_dirty_documents_at(&data_root, 250).map_err(|error| error.to_string())?;
     list_background_jobs_at(&data_root).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn queue_system_job(app: tauri::AppHandle, job_type: String) -> Result<Vec<JobSummary>, String> {
+    let allowed = [
+        "archive_analysis",
+        "reindex",
+        "backup",
+        "integrity_scan",
+        "portable_export",
+        "dirty_recompute",
+    ];
+    if !allowed.contains(&job_type.as_str()) {
+        return Err("Jobbtypen stöds inte".into());
+    }
+    let data_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    initialize_vault_at(&data_root).map_err(|error| error.to_string())?;
+    queue_system_job_at(&data_root, &job_type).map_err(|error| error.to_string())?;
+    list_background_jobs_at(&data_root).map_err(|error| error.to_string())
+}
+
+fn queue_system_job_at(data_root: &Path, job_type: &str) -> rusqlite::Result<i64> {
+    let connection = Connection::open(data_root.join("vault.db"))?;
+    let existing = connection
+        .query_row(
+            "SELECT id FROM jobs WHERE vault_id=1 AND job_type=?1 AND target_type='vault' AND status IN ('queued','running','paused','resuming') ORDER BY id DESC LIMIT 1",
+            [job_type],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    connection.execute(
+        "INSERT INTO jobs(vault_id,job_type,target_type,status,priority,payload_json,checkpoint_json,max_attempts) VALUES(1,?1,'vault','queued',75,'{}','{}',3)",
+        [job_type],
+    )?;
+    Ok(connection.last_insert_rowid())
+}
+
+#[tauri::command]
+fn control_background_job(
+    app: tauri::AppHandle,
+    job_id: i64,
+    action: String,
+) -> Result<Vec<JobSummary>, String> {
+    let data_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    initialize_vault_at(&data_root).map_err(|error| error.to_string())?;
+    control_background_job_at(&data_root, job_id, &action).map_err(|error| error.to_string())?;
+    list_background_jobs_at(&data_root).map_err(|error| error.to_string())
+}
+
+fn control_background_job_at(data_root: &Path, job_id: i64, action: &str) -> rusqlite::Result<()> {
+    let connection = Connection::open(data_root.join("vault.db"))?;
+    let changed = match action {
+        "pause" => connection.execute(
+            "UPDATE jobs SET pause_requested=1,status=CASE WHEN status='queued' THEN 'paused' ELSE status END,updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status IN('queued','running')",
+            [job_id],
+        )?,
+        "resume" => connection.execute(
+            "UPDATE jobs SET pause_requested=0,cancel_requested=0,status='queued',updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='paused'",
+            [job_id],
+        )?,
+        "cancel" => connection.execute(
+            "UPDATE jobs SET cancel_requested=1,status=CASE WHEN status IN('queued','paused','failed','requires_action') THEN 'cancelled' ELSE 'cancelling' END,updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status NOT IN('completed','cancelled')",
+            [job_id],
+        )?,
+        "retry" => connection.execute(
+            "UPDATE jobs SET status='queued',error_code=NULL,result_summary=NULL,pause_requested=0,cancel_requested=0,next_run_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status IN('failed','cancelled','requires_action') AND attempts<max_attempts",
+            [job_id],
+        )?,
+        _ => return Err(rusqlite::Error::InvalidParameterName("action".into())),
+    };
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
+}
+
+fn process_next_system_job_at(data_root: &Path) -> rusqlite::Result<bool> {
+    let connection = Connection::open(data_root.join("vault.db"))?;
+    let job = connection.query_row(
+        "SELECT id,job_type,attempts,max_attempts FROM jobs WHERE vault_id=1 AND target_type='vault' AND status IN('queued','resuming') AND pause_requested=0 AND cancel_requested=0 AND (next_run_at IS NULL OR datetime(next_run_at)<=CURRENT_TIMESTAMP) AND (depends_on_job_id IS NULL OR EXISTS(SELECT 1 FROM jobs parent WHERE parent.id=jobs.depends_on_job_id AND parent.status='completed')) ORDER BY priority,id LIMIT 1",
+        [], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,row.get::<_,i64>(3)?)),
+    ).optional()?;
+    let Some((job_id, job_type, attempts, max_attempts)) = job else { return Ok(false); };
+    connection.execute("UPDATE jobs SET status='running',attempts=attempts+1,progress_current=0,progress_total=1,updated_at=CURRENT_TIMESTAMP WHERE id=?1",[job_id])?;
+    drop(connection);
+    let outcome: Result<String, String> = match job_type.as_str() {
+        "archive_analysis" => analyze_production_archive_at(data_root).map(|value| format!("{} dokument analyserade", value.reindexed_document_count)).map_err(|error|error.to_string()),
+        "reindex" => rebuild_production_search_index_at(data_root).map(|value| format!("{} dokument indexerade", value.indexed_document_count)).map_err(|error|error.to_string()),
+        "backup" => create_local_backup_at(data_root).map(|value| format!("Backup skapad: {} dokument", value.document_count)).map_err(|error|error.to_string()),
+        "integrity_scan" => scan_file_integrity_at(data_root).map(|value| format!("{} filer kontrollerade", value.checked_files)).map_err(|error|error.to_string()),
+        "portable_export" => create_portable_archive_at(data_root).map(|value| format!("Export skapad: {}", value.archive_path)),
+        "dirty_recompute" => process_dirty_documents_at(data_root, 10_000).map(|count| format!("{count} ändrade dokument uppdaterade")).map_err(|error|error.to_string()),
+        _ => Err("Okänd beständig jobbtyp".into()),
+    };
+    let connection = Connection::open(data_root.join("vault.db"))?;
+    match outcome {
+        Ok(summary) => {
+            connection.execute("UPDATE jobs SET status='completed',progress_current=1,result_summary=?1,checkpoint_json='{\"completed\":true}',updated_at=CURRENT_TIMESTAMP WHERE id=?2",params![summary,job_id])?;
+        }
+        Err(error) => {
+            let status = if attempts + 1 >= max_attempts { "requires_action" } else { "failed" };
+            connection.execute("UPDATE jobs SET status=?1,error_code='job_failed',result_summary=?2,next_run_at=datetime('now','+1 minute'),updated_at=CURRENT_TIMESTAMP WHERE id=?3",params![status,error.chars().take(500).collect::<String>(),job_id])?;
+        }
+    }
+    Ok(true)
+}
+
+fn process_dirty_documents_at(data_root: &Path, limit: i64) -> rusqlite::Result<i64> {
+    let mut connection = Connection::open(data_root.join("vault.db"))?;
+    let ids = {
+        let mut statement = connection.prepare("SELECT document_id FROM dirty_documents ORDER BY marked_at,document_id LIMIT ?1")?;
+        let values = statement.query_map([limit], |row| row.get::<_,i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        values
+    };
+    let transaction = connection.transaction()?;
+    let mut processed = 0;
+    for document_id in ids {
+        let document = transaction.query_row(
+            "SELECT title,document_type,COALESCE(extracted_text,'') FROM documents WHERE id=?1 AND trashed_at IS NULL",
+            [document_id],
+            |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)),
+        ).optional()?;
+        if let Some((title, document_type, text)) = document {
+            index_document(&transaction, document_id, &title, &document_type, &text)?;
+            apply_content_claims(&transaction, document_id, &title, &document_type, &text)?;
+            apply_auto_entities(&transaction, document_id, &title, &document_type, &text)?;
+            processed += 1;
+        }
+        transaction.execute("DELETE FROM dirty_documents WHERE document_id=?1",[document_id])?;
+    }
+    transaction.commit()?;
+    Ok(processed)
 }
 
 fn process_watched_folder_job_at(data_root: &Path) -> rusqlite::Result<()> {
@@ -8664,6 +8801,8 @@ fn start_background_worker(data_root: PathBuf) {
         loop {
             thread::sleep(Duration::from_secs(2));
             let _ = process_next_ocr_job_at(&data_root);
+            let _ = process_next_system_job_at(&data_root);
+            let _ = process_dirty_documents_at(&data_root, 25);
             ticks += 1;
             if ticks % 30 == 0 {
                 let _ = process_watched_folder_job_at(&data_root);
@@ -11856,6 +11995,8 @@ pub fn run() {
             scan_watched_folders,
             list_background_jobs,
             run_background_jobs_now,
+            queue_system_job,
+            control_background_job,
             queue_document_ocr,
             set_ocr_job_paused,
             ocr_status,
@@ -12770,6 +12911,41 @@ fn applies_audited_batch_actions_and_marks_documents_dirty() {
         )
         .expect("batch run");
     assert_eq!(run_count, 1);
+}
+
+#[test]
+fn persists_controls_and_completes_system_jobs_incrementally() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    initialize_vault_at(temp.path()).expect("initialize");
+    let source = temp.path().join("dirty-document.txt");
+    fs::write(&source, "DAGAB kontrakt med selektiv uppdatering").expect("fixture");
+    let imported = import_document_at(temp.path(), &source).expect("import");
+    apply_batch_action_at(temp.path(), vec![imported.document.id], "add_tag", "Ändrad")
+        .expect("dirty");
+    assert_eq!(process_dirty_documents_at(temp.path(), 25).expect("process dirty"), 1);
+    let connection = Connection::open(temp.path().join("vault.db")).expect("database");
+    let dirty: i64 = connection
+        .query_row("SELECT COUNT(*) FROM dirty_documents", [], |row| row.get(0))
+        .expect("dirty count");
+    assert_eq!(dirty, 0);
+    drop(connection);
+
+    let job_id = queue_system_job_at(temp.path(), "backup").expect("queue");
+    assert_eq!(queue_system_job_at(temp.path(), "backup").expect("idempotent queue"), job_id);
+    control_background_job_at(temp.path(), job_id, "pause").expect("pause");
+    assert!(!process_next_system_job_at(temp.path()).expect("paused not processed"));
+    control_background_job_at(temp.path(), job_id, "resume").expect("resume");
+    assert!(process_next_system_job_at(temp.path()).expect("process"));
+    let jobs = list_background_jobs_at(temp.path()).expect("jobs");
+    let job = jobs.iter().find(|item| item.id == job_id).expect("job");
+    assert_eq!(job.status, "completed");
+    assert_eq!(job.progress_current, 1);
+    assert!(job.result_summary.as_deref().unwrap_or_default().contains("Backup"));
+
+    let cancelled = queue_system_job_at(temp.path(), "reindex").expect("queue cancelled");
+    control_background_job_at(temp.path(), cancelled, "cancel").expect("cancel");
+    control_background_job_at(temp.path(), cancelled, "retry").expect("retry");
+    assert!(process_next_system_job_at(temp.path()).expect("retry processed"));
 }
 
 #[test]

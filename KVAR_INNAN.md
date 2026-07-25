@@ -32,8 +32,8 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 
 ## 4. Analys, regler och bakgrundsjobb
 - [x] ✅ Jobb-tabell med status (schema v9)
-- [ ] 🔶 Enhetlig beständig jobbmodell med payload, checkpoints, beroenden, paus, avbrott och retry-policy
-- [ ] 🔶 Incrementell aktualitet med beständiga dirty flags och orsak
+- [ ] 🔷 Enhetlig beständig jobbmodell med payload, checkpoints, beroenden, paus, avbrott och retry-policy för OCR, analys, index, backup, integritet och export
+- [ ] 🔷 Incrementell aktualitet med beständiga dirty flags, orsak och selektiv omindexering/claim-/entitetsuppdatering
 - [ ] 🔷 Regelbyggare UI med AND/OR/NOT, flera villkor, versionshantering, matchförklaringar och test/förslagsläge
 - [ ] 🔷 Batchåtgärder för upp till 10 000 valda dokument: tagg, typ, arkiv och granskning
 

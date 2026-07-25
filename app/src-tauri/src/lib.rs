@@ -601,6 +601,8 @@ struct VersionComparison {
     page_change: i64,
     date_changed: bool,
     identical: bool,
+    left_lines: Vec<String>,
+    right_lines: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -7530,6 +7532,8 @@ fn compare_document_versions(
         page_change: r.4 - l.4,
         date_changed: l.1 != r.1,
         identical: l.3 == r.3,
+        left_lines: lt.lines().map(String::from).take(5000).collect(),
+        right_lines: rt.lines().map(String::from).take(5000).collect(),
     })
 }
 

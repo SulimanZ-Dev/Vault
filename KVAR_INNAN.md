@@ -10,7 +10,7 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 - [x] ✅ Valbart textlager och lokala sökträffar
 - [x] ✅ Versions- och sidbundna markeringar med normaliserade koordinater
 - [ ] 🔷 Claim till exakt källsida, söktext och koordinatmarkering
-- [ ] ❌ Dokumentjämförelse sida vid sida
+- [ ] 🔷 Dokumentjämförelse sida vid sida med ordningsbevarad text och markerade skillnader
 
 ## 2. Djupare områdesmodeller
 - [x] ✅ Grundläggande domänregister (schema v11)

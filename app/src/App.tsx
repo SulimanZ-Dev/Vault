@@ -1,8 +1,10 @@
 ﻿import { useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { lazy, Suspense } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import './App.css'
+const DocumentViewer = lazy(() => import('./DocumentViewer').then((module) => ({ default: module.DocumentViewer })))
 
 type EnvironmentStatus = {
   app_mode: string
@@ -646,6 +648,8 @@ function App() {
   const [viewerRotation,setViewerRotation]=useState(0)
   const [viewerSearch,setViewerSearch]=useState('')
   const [viewerFullscreen,setViewerFullscreen]=useState(false)
+  const [internalViewerOpen,setInternalViewerOpen]=useState(false)
+  const [viewerSourceClaim,setViewerSourceClaim]=useState<ClaimSummary|null>(null)
   const [annotations,setAnnotations]=useState<DocumentAnnotationSummary[]>([])
   const [annotationDraft,setAnnotationDraft]=useState({type:'note' as 'bookmark'|'note'|'highlight',selectedText:'',body:'',color:'#ffe08a'})
   const [versionSelection,setVersionSelection]=useState<number[]>([])
@@ -1906,6 +1910,7 @@ function App() {
   return (
     <main className="vault-shell">
       <a className="skip-link" href="#vault-workspace">Hoppa till arbetsytan</a>
+      {internalViewerOpen&&selectedDocumentId?<Suspense fallback={<div className="viewer-module-loading">Startar den lokala dokumentvisaren…</div>}><DocumentViewer documentId={selectedDocumentId} initialPage={selectedPageNo} initialSearch={viewerSourceClaim?.source_text??''} onClose={()=>{setInternalViewerOpen(false);setViewerSourceClaim(null)}} onPageChange={setSelectedPageNo} pin={securityCredential} sourceClaimId={viewerSourceClaim?.id??null} sourceRule={viewerSourceClaim?.extraction_method??''} title={selectedDocument.title}/></Suspense>:null}
       {commandPaletteOpen?<div className="command-palette-backdrop" onMouseDown={()=>setCommandPaletteOpen(false)}><section className="command-palette" onMouseDown={event=>event.stopPropagation()}><header><input aria-label="Kommandopalett" autoFocus placeholder="Sök kommando…" value={commandQuery} onChange={event=>setCommandQuery(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&commandItems[0]&&!commandShortcutEditing)runCommand(commandItems[0])}}/><button className="mini-action" onClick={()=>setCommandShortcutEditing(value=>!value)}>{commandShortcutEditing?'Klar':'Kortkommandon'}</button></header><div>{commandItems.map(item=><div className="command-row" key={item.id}><button onClick={()=>runCommand(item)} type="button"><strong>{item.label}</strong><small>{item.keywords}</small></button>{commandShortcutEditing?<input aria-label={`Kortkommando för ${item.label}`} placeholder="Ctrl+Alt+D" value={commandShortcuts[item.id]??''} onChange={event=>setCommandShortcuts(current=>({...current,[item.id]:event.target.value}))} onKeyDown={event=>{event.stopPropagation();if(event.key==='Backspace'||event.key==='Delete'){event.preventDefault();setCommandShortcuts(current=>({...current,[item.id]:''}));return}if(['Control','Alt','Shift','Meta','Tab'].includes(event.key))return;event.preventDefault();const value=[event.ctrlKey?'Ctrl':'',event.altKey?'Alt':'',event.shiftKey?'Shift':'',event.key.length===1?event.key.toUpperCase():event.key].filter(Boolean).join('+');if(value&&!Object.entries(commandShortcuts).some(([id,shortcut])=>id!==item.id&&shortcut===value))setCommandShortcuts(current=>({...current,[item.id]:value}))}}/>:<kbd>{commandShortcuts[item.id]??''}</kbd>}</div>)}</div><footer>Ctrl+K öppnar · Enter kör första · Esc stänger{commandShortcutEditing?' · Tryck önskad tangentkombination i ett fält':''}</footer></section></div>:null}
       {!vaultUnlocked && securityStatus.mode!=='comfortable' ? <div className="vault-lock-screen"><div className="lock-card"><div className="brand-mark">V</div><h1>Vault är låst</h1><p>Arkivet och förhandsvisningar är dolda tills du verifierats lokalt.</p><input aria-label="PIN eller lösenord" autoFocus type="password" value={unlockPin} onChange={e=>setUnlockPin(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')void handleUnlockVault()}}/><button className="primary-action" onClick={handleUnlockVault} type="button">Lås upp med PIN/lösenord</button>{windowsHello.available?<button className="secondary-action" onClick={handleWindowsHelloUnlock} type="button">Lås upp med Windows Hello</button>:null}<small>{windowsHello.explanation}</small>{workflowError?<p className="inline-error">{workflowError}</p>:null}</div></div>:null}
       <aside className="sidebar" aria-label="Huvudnavigering">
@@ -2804,7 +2809,7 @@ function App() {
           <aside className="details-pane" aria-label="Dokumentinformation">
             <h2>Detaljer</h2>
             <div className="detail-actions">
-              <button className="primary-action" disabled={!selectedResult} onClick={()=>setViewerFullscreen(true)} type="button">Öppna dokumentvisare</button>
+              <button className="primary-action" disabled={!selectedResult||!canUseStoredFile} onClick={()=>setInternalViewerOpen(true)} type="button">Öppna dokumentvisare</button>
               <button
                 className="secondary-action"
                 disabled={!canUseStoredFile}
@@ -3105,6 +3110,14 @@ function App() {
                         {claim.effective_from ? ` från ${claim.effective_from}` : ''}
                         <br />
                         {claim.actuality_explanation}
+                        {claim.source_page_no ? (
+                          <>
+                            <br />
+                            <button className="mini-action" onClick={() => { setSelectedPageNo(claim.source_page_no ?? 1); setViewerSourceClaim(claim); setInternalViewerOpen(true) }} type="button">
+                              Visa källa i dokumentet
+                            </button>
+                          </>
+                        ) : null}
                       </dd>
                     </div>
                   ))}

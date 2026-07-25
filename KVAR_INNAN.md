@@ -4,12 +4,12 @@ Detta dokument spårar status för varje krav i originalprompten.
 Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering) | 🔶 Delvis | ❌ Saknas | ➖ Inte relevant
 
 ## 1. Dokumentvisaren
-- [ ] 🔶 PDF-rendering internt (bildvisning finns, PDF kräver extern app ännu)
-- [ ] 🔶 Sidnavigation (grundläggande finns i schema v25, fullständig UI-integration saknas)
-- [ ] ❌ Miniatyrer med lazy loading
-- [ ] ❌ Textlager och sökträffar
-- [ ] ❌ Markeringar och koordinater
-- [ ] ❌ Claim till källa
+- [x] ✅ PDF-rendering internt (PDF.js är bundlat offline och verifierat i release-EXE)
+- [x] ✅ Sidnavigation, zoom, passning, rotation och återställning av senaste läge
+- [x] ✅ Miniatyrer med fönstrad lazy rendering
+- [x] ✅ Valbart textlager och lokala sökträffar
+- [x] ✅ Versions- och sidbundna markeringar med normaliserade koordinater
+- [ ] 🔷 Claim till exakt källsida, söktext och koordinatmarkering
 - [ ] ❌ Dokumentjämförelse sida vid sida
 
 ## 2. Djupare områdesmodeller

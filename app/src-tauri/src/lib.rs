@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -43,6 +44,8 @@ const VIEWER_VERSIONS_MIGRATION: &str = include_str!("../migrations/0025_viewer_
 const BACKUP_DESTINATIONS_MIGRATION: &str =
     include_str!("../migrations/0026_backup_destinations.sql");
 const DOMAIN_MODELS_MIGRATION: &str = include_str!("../migrations/0027_domain_models.sql");
+const VIEWER_COORDINATES_MIGRATION: &str =
+    include_str!("../migrations/0028_viewer_coordinates.sql");
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (1, "initial local vault schema", INITIAL_MIGRATION),
     (
@@ -126,6 +129,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         27,
         "deep domain models for identity vehicles employment warranties",
         DOMAIN_MODELS_MIGRATION,
+    ),
+    (
+        28,
+        "normalized viewer coordinates and claim source links",
+        VIEWER_COORDINATES_MIGRATION,
     ),
 ];
 
@@ -367,6 +375,18 @@ struct DocumentDetail {
 }
 
 #[derive(Serialize)]
+struct DocumentViewerContent {
+    document_id: i64,
+    version_id: i64,
+    original_name: String,
+    mime_type: String,
+    sha256: String,
+    size_bytes: u64,
+    page_count_hint: i64,
+    content_base64: String,
+}
+
+#[derive(Serialize)]
 struct ClaimSummary {
     id: i64,
     claim_type: String,
@@ -558,6 +578,15 @@ struct DocumentAnnotationSummary {
     color: String,
     created_at: String,
     updated_at: String,
+    document_version_id: Option<i64>,
+    x: Option<f64>,
+    y: Option<f64>,
+    width: Option<f64>,
+    height: Option<f64>,
+    text_start: Option<i64>,
+    text_end: Option<i64>,
+    claim_id: Option<i64>,
+    rule_result: String,
 }
 
 #[derive(Serialize)]
@@ -2876,6 +2905,23 @@ fn decrypt_private_file(archive_path: &Path, password: &str, target: &Path) -> R
     let mut output = fs::File::create(target).map_err(|e| e.to_string())?;
     std::io::copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn decrypt_private_file_bytes(archive_path: &Path, password: &str) -> Result<Vec<u8>, String> {
+    let file = fs::File::open(archive_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    if archive.len() != 1 {
+        return Err("Den privata behållaren har ogiltigt innehåll".into());
+    }
+    let mut entry = archive
+        .by_index_decrypt(0, password.as_bytes())
+        .map_err(|_| "Fel PIN/lösenord eller skadad privat behållare".to_string())?;
+    if entry.size() > 268_435_456 {
+        return Err("Dokumentet är större än visningsgränsen 256 MB".into());
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes)
 }
 
 #[tauri::command]
@@ -7148,7 +7194,7 @@ fn list_document_annotations(
     let data_root = app.path().app_data_dir().map_err(|e| e.to_string())?;
     initialize_vault_at(&data_root).map_err(|e| e.to_string())?;
     let connection = Connection::open(data_root.join("vault.db")).map_err(|e| e.to_string())?;
-    let mut statement = connection.prepare("SELECT id,document_id,page_no,annotation_type,selected_text,body,color,created_at,updated_at FROM document_annotations WHERE document_id=?1 ORDER BY page_no,id DESC").map_err(|e| e.to_string())?;
+    let mut statement = connection.prepare("SELECT id,document_id,page_no,annotation_type,selected_text,body,color,created_at,updated_at,document_version_id,x,y,width,height,text_start,text_end,claim_id,rule_result FROM document_annotations WHERE document_id=?1 ORDER BY page_no,id DESC").map_err(|e| e.to_string())?;
     let annotations = statement
         .query_map(params![document_id], |row| {
             Ok(DocumentAnnotationSummary {
@@ -7161,12 +7207,91 @@ fn list_document_annotations(
                 color: row.get(6)?,
                 created_at: row.get(7)?,
                 updated_at: row.get(8)?,
+                document_version_id: row.get(9)?,
+                x: row.get(10)?,
+                y: row.get(11)?,
+                width: row.get(12)?,
+                height: row.get(13)?,
+                text_start: row.get(14)?,
+                text_end: row.get(15)?,
+                claim_id: row.get(16)?,
+                rule_result: row.get(17)?,
             })
         })
         .map_err(|e| e.to_string())?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
     Ok(annotations)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn save_coordinate_annotation(
+    app: tauri::AppHandle,
+    document_id: i64,
+    document_version_id: i64,
+    page_no: i64,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    selected_text: String,
+    body: String,
+    color: String,
+    claim_id: Option<i64>,
+    rule_result: String,
+) -> Result<Vec<DocumentAnnotationSummary>, String> {
+    let values = [x, y, width, height];
+    if values
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0 || *value > 1.0)
+        || x + width > 1.000_001
+        || y + height > 1.000_001
+        || width <= 0.001
+        || height <= 0.001
+    {
+        return Err("Markeringskoordinaterna måste vara normaliserade mellan 0 och 1".into());
+    }
+    let data_root = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    initialize_vault_at(&data_root).map_err(|e| e.to_string())?;
+    let connection = Connection::open(data_root.join("vault.db")).map_err(|e| e.to_string())?;
+    let version_matches: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM document_versions WHERE id=?1 AND document_id=?2)",
+            params![document_version_id, document_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !version_matches {
+        return Err("Dokumentversionen hör inte till dokumentet".into());
+    }
+    if let Some(id) = claim_id {
+        let claim_matches: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1 AND document_id=?2)",
+                params![id, document_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !claim_matches {
+            return Err("Claim-källan hör inte till dokumentet".into());
+        }
+    }
+    connection.execute(
+        "INSERT INTO document_annotations(document_id,document_version_id,page_no,annotation_type,selected_text,body,color,x,y,width,height,claim_id,rule_result)
+         VALUES(?1,?2,?3,'highlight',?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        params![document_id,document_version_id,page_no.max(1),selected_text.trim(),body.trim(),color,x,y,width,height,claim_id,rule_result.trim()],
+    ).map_err(|e|e.to_string())?;
+    record_audit_event(
+        &connection,
+        "coordinate_annotation_saved",
+        "document",
+        Some(document_id),
+        "Normalized page annotation saved",
+    )
+    .map_err(|e| e.to_string())?;
+    drop(connection);
+    list_document_annotations(app, document_id)
 }
 
 #[tauri::command]
@@ -7954,6 +8079,93 @@ fn ensure_document_access_at(
         return Err("Dokumentet är låst. Lås upp Vault med rätt PIN/lösenord först".into());
     }
     Ok(())
+}
+
+#[tauri::command]
+fn get_document_viewer_content(
+    app: tauri::AppHandle,
+    document_id: i64,
+    pin: Option<String>,
+) -> Result<DocumentViewerContent, String> {
+    let data_root = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    initialize_vault_at(&data_root).map_err(|e| e.to_string())?;
+    ensure_document_access_at(&data_root, document_id, pin.as_deref())?;
+    let connection = Connection::open(data_root.join("vault.db")).map_err(|e| e.to_string())?;
+    let (version_id, storage_path, original_name, mime_type, expected_sha256, encrypted): (
+        i64,
+        String,
+        String,
+        String,
+        String,
+        i64,
+    ) = connection
+        .query_row(
+            "SELECT dv.id,f.storage_path,f.original_name,f.mime_type,f.sha256,COALESCE(f.encrypted_at_rest,0)
+             FROM document_versions dv JOIN files f ON f.id=dv.file_id JOIN documents d ON d.id=dv.document_id
+             WHERE d.id=?1 AND d.vault_id=1 AND d.trashed_at IS NULL AND dv.is_current_file=1",
+            [document_id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let source = data_root.join(&storage_path);
+    let mut bytes = if encrypted != 0 {
+        let password = pin
+            .as_deref()
+            .ok_or_else(|| "PIN/lösenord krävs för privat dokument".to_string())?;
+        decrypt_private_file_bytes(&source, password)?
+    } else {
+        let metadata = fs::metadata(&source).map_err(|_| "Originalfilen saknas".to_string())?;
+        if metadata.len() > 268_435_456 {
+            return Err("Dokumentet är större än visningsgränsen 256 MB".into());
+        }
+        fs::read(&source).map_err(|e| e.to_string())?
+    };
+    let actual_sha256 = hex::encode(Sha256::digest(&bytes));
+    if actual_sha256 != expected_sha256 {
+        return Err("Dokumentets SHA-256 matchar inte den importerade originalfilen".into());
+    }
+    let mut viewer_mime = mime_type.clone();
+    if mime_type.starts_with("image/")
+        && !matches!(
+            mime_type.as_str(),
+            "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+        )
+    {
+        let decoded = image::load_from_memory(&bytes)
+            .map_err(|e| format!("Bildformatet kunde inte avkodas: {e}"))?;
+        let mut normalized = std::io::Cursor::new(Vec::new());
+        decoded
+            .write_to(&mut normalized, image::ImageFormat::Png)
+            .map_err(|e| format!("Bilden kunde inte normaliseras för visning: {e}"))?;
+        bytes = normalized.into_inner();
+        viewer_mime = "image/png".into();
+    }
+    let page_count_hint: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM document_pages WHERE document_version_id=?1",
+            [version_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    record_audit_event(
+        &connection,
+        "document_viewed_internal",
+        "document",
+        Some(document_id),
+        "Authenticated internal viewer content opened",
+    )
+    .map_err(|e| e.to_string())?;
+    let size_bytes = bytes.len() as u64;
+    Ok(DocumentViewerContent {
+        document_id,
+        version_id,
+        original_name,
+        mime_type: viewer_mime,
+        sha256: expected_sha256,
+        size_bytes,
+        page_count_hint,
+        content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
 }
 
 #[tauri::command]
@@ -10838,6 +11050,7 @@ pub fn run() {
             reveal_production_document_file,
             open_protected_document_file,
             reveal_protected_document_file,
+            get_document_viewer_content,
             trash_production_document,
             restore_production_document,
             create_local_backup,
@@ -10878,6 +11091,7 @@ pub fn run() {
             add_document_version,
             list_document_annotations,
             save_document_annotation,
+            save_coordinate_annotation,
             delete_document_annotation,
             compare_document_versions,
             restore_document_version,
@@ -11010,7 +11224,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let status = initialize_vault_at(temp_dir.path()).expect("vault initialization");
 
-        assert_eq!(status.schema_version, 27);
+        assert_eq!(status.schema_version, 28);
         assert_eq!(status.testlab_document_count, 4);
         assert!(status.production_vault_ready);
         assert!(PathBuf::from(status.database_path).exists());

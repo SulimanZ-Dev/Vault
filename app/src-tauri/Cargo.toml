@@ -27,6 +27,7 @@ tauri-plugin-dialog = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
 zip = { version = "4", default-features = false, features = ["deflate", "aes-crypto"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
 

@@ -1426,6 +1426,11 @@ function App() {
       setRestoreError('Ingen backup finns att återställa')
       return
     }
+    if (!backupValidation?.ok || !restoreTest?.ok) {
+      setRestoreError('Validera backupen och kör isolerat återställningsprov först')
+      return
+    }
+    if (!window.confirm(`Full återställning ersätter aktivt arkiv med ${backups[0].document_count} dokument. Vault skapar först en separat återställningspunkt. Fortsätta?`)) return
 
     setRestoreError(null)
     setIsRestoringBackup(true)
@@ -2693,6 +2698,18 @@ function App() {
 
             {activeView === 'backup' ? (
               <div className="work-panel-grid">
+                <div className="work-item form-stack restore-wizard">
+                  <strong>Guide för säker återställning</strong>
+                  <ol>
+                    <li className={backups.length?'done':''}><b>1. Välj backup</b><span>{backups[0]?.backup_root??'Skapa eller välj en backup'}</span></li>
+                    <li className={backupValidation?.ok?'done':''}><b>2. Verifiera manifest, SHA-256 och databas</b><button className="mini-action" disabled={!backups.length||isValidatingBackup} onClick={handleValidateLatestBackup} type="button">{isValidatingBackup?'Verifierar…':'Verifiera senaste'}</button></li>
+                    <li className={restoreTest?.ok?'done':''}><b>3. Visa innehåll och prova isolerat</b><span>{backupValidation?`${backupValidation.document_count} dokument · ${backupValidation.file_count} filer · SQLite ${backupValidation.database_integrity}`:'Väntar på verifiering'}</span><button className="mini-action" disabled={!backupValidation?.ok} onClick={handleTestLatestRestore} type="button">Kör isolerat prov</button></li>
+                    <li><b>4. Full restore med återställningspunkt</b><button className="primary-action" disabled={!backupValidation?.ok||!restoreTest?.ok||isRestoringBackup} onClick={handleRestoreLatestBackup} type="button">{isRestoringBackup?'Återställer…':'Genomför full restore'}</button></li>
+                    <li className={lastRestore&&healthReport?.ok?'done':''}><b>5. Verifiera resultat och index</b><span>{lastRestore?`${lastRestore.document_count} dokument · ${lastRestore.file_count} filer · återställningspunkt ${lastRestore.pre_restore_backup_root}`:'Ingen restore körd i sessionen'}</span>{lastRestore?<button className="mini-action" onClick={handleReindexSearch} type="button">Bygg om sökindex</button>:null}</li>
+                  </ol>
+                  {backupValidation?.warnings.map(warning=><small key={warning}>{warning}</small>)}
+                  {restoreError?<p className="inline-error">{restoreError}</p>:null}
+                </div>
                 <div className="work-item form-stack"><strong>Schemalagd lokal backup</strong><label><input type="checkbox" checked={backupPolicy.enabled} onChange={e=>setBackupPolicy({...backupPolicy,enabled:e.target.checked})}/> Kör automatiskt</label><label><input type="checkbox" checked={backupPolicy.paused} onChange={e=>setBackupPolicy({...backupPolicy,paused:e.target.checked})}/> Pausad</label><label>Intervall i timmar<input type="number" min="1" max="8760" value={backupPolicy.interval_hours} onChange={e=>setBackupPolicy({...backupPolicy,interval_hours:Number(e.target.value)})}/></label><label>Backuptyp<select value={backupPolicy.backup_mode} onChange={e=>setBackupPolicy({...backupPolicy,backup_mode:e.target.value})}><option value="incremental">Inkrementell, självständig</option><option value="full">Full kopia</option></select></label><label>Destination<input readOnly placeholder="Standard: Vaults lokala datamapp" value={backupPolicy.destination_path??''}/></label><div className="claim-actions"><button className="secondary-action" onClick={handleChooseBackupDestination} type="button">Välj disk eller nätverksmapp</button>{backupPolicy.destination_path?<button className="mini-action" onClick={()=>setBackupPolicy({...backupPolicy,destination_path:null})} type="button">Använd standardmapp</button>:null}</div><label>Undanta dokument-ID:n<input placeholder="12, 45" value={backupExclusions} onChange={e=>setBackupExclusions(e.target.value)}/></label><div className="claim-actions"><button className="primary-action" onClick={handleSaveBackupPolicy} type="button">Spara backuppolicy</button><button className="secondary-action" disabled={isCreatingBackup||backupPolicy.paused} onClick={handleRunConfiguredBackup} type="button">Kör enligt policy nu</button></div><small>{backupPolicy.last_run_epoch_seconds?`Senast körd ${new Date(backupPolicy.last_run_epoch_seconds*1000).toLocaleString('sv-SE')}`:'Ingen policykörning ännu'}</small><small>{backupPolicy.destination_path?`Extra kopia: ${backupPolicy.destination_path}`:'Backup lagras i Vaults lokala datamapp.'}</small><small>Inkrementella set hårdlänkar oförändrade filer när Windows-filsystemet tillåter det men kan återställas fristående.</small></div>
                 <div className="work-item">
                   <strong>Backup</strong>

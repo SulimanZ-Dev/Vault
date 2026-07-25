@@ -52,7 +52,7 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 - [x] ✅ Schemalagd backup
 - [ ] ❌ Backup till extern disk/nätverksmapp
 - [ ] ❌ Säkert upplåsningsflöde (Credential Manager/DPAPI)
-- [ ] ❌ Restore-guide (välj backup → verifiera → lösenord → innehåll → restore)
+- [ ] 🔷 Restore-guide (välj → verifiera SHA/SQLite → innehåll → isolerat prov → bekräftad full restore → återställningspunkt → hälsa/index)
 - [ ] 🔷 Temporära filer (kontrollerad katalog, städning vid start/efter operation och ZIP-import flyttad ur permanent index)
 
 ## 7. Säkerhet och hårdning

@@ -82,6 +82,7 @@ type RuleRunResult = { scanned_document_count:number; matched_document_count:num
 type SecurityStatus = { mode:string; pin_configured:boolean; auto_lock_minutes:number; mask_sensitive:boolean; locked_document_count:number;private_document_count:number }
 type WindowsHelloStatus = {available:boolean;explanation:string}
 type ProtectedExportResult = { export_path:string; sha256:string; size_bytes:number; masked:boolean }
+type DataExportResult = { export_path:string; format:string; table_count:number; row_count:number; file_count:number; sha256:string|null }
 
 type DocumentDetail = {
   document: DocumentSummary
@@ -619,6 +620,8 @@ function App() {
   const [backupPassword, setBackupPassword] = useState('')
   const [protectedBackup, setProtectedBackup] = useState<ProtectedBackupResult | null>(null)
   const [portableArchive,setPortableArchive]=useState<PortableArchiveResult|null>(null)
+  const [dataExport,setDataExport]=useState<DataExportResult|null>(null)
+  const [dataExportDraft,setDataExportDraft]=useState({format:'package',includeOriginals:true,folderLayout:'vault'})
   const [integrityReport,setIntegrityReport]=useState<IntegrityScanReport|null>(null)
   const [plugins,setPlugins]=useState<PluginSummary[]>([])
   const [pluginRun,setPluginRun]=useState<PluginRunResult|null>(null)
@@ -1339,6 +1342,7 @@ function App() {
   async function handleRestorePasswordBackup(){if(!passwordRestorePath||backupPassword.length<8)return;if(!window.confirm('Vault skapar först en säkerhetskopia av nuvarande arkiv och återställer sedan den krypterade backupen. Fortsätta?'))return;setRestoreError(null);try{setLastRestore(await invoke('restore_password_backup',{archivePath:passwordRestorePath,password:backupPassword}));setBackupPassword('');setProductionDocuments(await invoke('list_production_documents'));setBackups(await invoke('list_local_backups'));setHealthReport(await invoke('check_vault_health'))}catch(error){setRestoreError(String(error))}}
 
   async function handleCreatePortableArchive(){setBackupError(null);try{setPortableArchive(await invoke('create_portable_archive'))}catch(error){setBackupError(String(error))}}
+  async function handleCreateDataExport(){setBackupError(null);try{setDataExport(await invoke('create_data_export',{format:dataExportDraft.format,includeOriginals:dataExportDraft.includeOriginals,folderLayout:dataExportDraft.folderLayout}))}catch(error){setBackupError(String(error))}}
 
   async function handleRestorePortableArchive(){
     const selected=await open({multiple:false,filters:[{name:'Vault portabelt arkiv',extensions:['vaultarchive']}]})
@@ -2715,6 +2719,15 @@ function App() {
                   <div className="claim-actions"><button className="mini-action" onClick={handleCreatePortableArchive} type="button">Exportera .vaultarchive</button><button className="mini-action" onClick={handleRestorePortableArchive} type="button">Importera på denna dator</button></div>
                   {portableArchive?<><small className="path-value">{portableArchive.archive_path}</small><code>{portableArchive.document_count} dokument · {portableArchive.file_count} filer · SHA-256 {portableArchive.sha256.slice(0,20)}…</code></>:null}
                   {restoreError?<p className="inline-error">{restoreError}</p>:null}
+                </div>
+                <div className="work-item form-stack">
+                  <strong>Fristående dataexport</strong>
+                  <span>Exporterar metadata, claims, relationer, historik, kategorier, regler, teman, kodord, sökningar och layout med stabila ID:n.</span>
+                  <label>Format<select value={dataExportDraft.format} onChange={event=>setDataExportDraft({...dataExportDraft,format:event.target.value})}><option value="package">Paket (.vaultzip)</option><option value="json">JSON</option><option value="csv">CSV-mapp</option></select></label>
+                  <label>Mappstruktur<select value={dataExportDraft.folderLayout} onChange={event=>setDataExportDraft({...dataExportDraft,folderLayout:event.target.value})}><option value="vault">Vault-struktur</option><option value="flat">Platt</option><option value="type">Efter dokumenttyp</option></select></label>
+                  <label><input type="checkbox" checked={dataExportDraft.includeOriginals} onChange={event=>setDataExportDraft({...dataExportDraft,includeOriginals:event.target.checked})}/> Inkludera originaldokument</label>
+                  <button className="primary-action" onClick={handleCreateDataExport} type="button">Skapa dataexport</button>
+                  {dataExport?<><small className="path-value">{dataExport.export_path}</small><code>{dataExport.row_count} rader · {dataExport.file_count} original · {dataExport.table_count} tabeller</code></>:null}
                 </div>
                 <div className="work-item">
                   <strong>Arkivhälsa</strong>

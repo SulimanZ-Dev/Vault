@@ -39,11 +39,11 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 
 ## 5. Import, export och portabilitet
 - [x] ✅ .vaultarchive-format (schema v20)
-- [ ] ❌ Fristående export (metadata, claims, relationer, historik)
-- [ ] ❌ Exportformat (JSON, CSV, paketformat)
-- [ ] ❌ Mappstruktur (platt, Vault-struktur, användarvald)
-- [ ] ❌ .vaultzip-format dokumentation
-- [ ] ❌ Portabilitetstest på ren Windows-profil
+- [ ] 🔷 Fristående export (metadata, claims, relationer, historik, regler, teman, kodord, sökningar och layout)
+- [ ] 🔷 Exportformat (JSON, CSV och versionerat .vaultzip-paket)
+- [ ] 🔷 Mappstruktur (platt, Vault-struktur eller dokumenttyp med kollisionssäkra namn)
+- [x] ✅ .vaultarchive- och .vaultzip-format dokumenterade och versionsstyrda
+- [ ] 🔶 Portabilitetstest dokumenterat och automatiserat där möjligt; fysisk ren Windows-profil återstår
 
 ## 6. Backup och temporär säkerhet
 - [x] ✅ Lokal backup (full, inkrementell)

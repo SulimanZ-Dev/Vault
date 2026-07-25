@@ -1,5 +1,5 @@
 use base64::Engine as _;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, types::ValueRef, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -372,6 +372,16 @@ struct ProtectedExportResult {
     sha256: String,
     size_bytes: u64,
     masked: bool,
+}
+
+#[derive(Serialize)]
+struct DataExportResult {
+    export_path: String,
+    format: String,
+    table_count: usize,
+    row_count: usize,
+    file_count: usize,
+    sha256: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -5612,6 +5622,201 @@ fn create_portable_archive_at(data_root: &Path) -> Result<PortableArchiveResult,
         document_count: backup.document_count,
         file_count: backup.file_count,
     })
+}
+
+const EXPORT_TABLES: &[&str] = &[
+    "documents", "files", "document_versions", "document_pages", "claims",
+    "source_spans", "entities", "document_entities", "relations", "tags",
+    "document_tags", "folders", "categories", "saved_searches", "automation_rules",
+    "theme_profiles", "code_words", "dashboard_layouts", "timeline_events",
+    "conflicts", "conflict_decisions", "verification_history", "audit_events",
+];
+
+fn sqlite_json(value: ValueRef<'_>) -> serde_json::Value {
+    match value {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(value) => value.into(),
+        ValueRef::Real(value) => serde_json::json!(value),
+        ValueRef::Text(value) => String::from_utf8_lossy(value).into_owned().into(),
+        ValueRef::Blob(value) => base64::engine::general_purpose::STANDARD.encode(value).into(),
+    }
+}
+
+fn export_table_rows(
+    connection: &Connection,
+    table: &str,
+) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !exists {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection
+        .prepare(&format!("SELECT * FROM \"{table}\""))
+        .map_err(|error| error.to_string())?;
+    let columns = statement
+        .column_names()
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    let rows = statement
+        .query_map([], |row| {
+            let mut object = serde_json::Map::new();
+            for (index, name) in columns.iter().enumerate() {
+                object.insert(name.clone(), sqlite_json(row.get_ref(index)?));
+            }
+            Ok(object)
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| error.to_string())?;
+    Ok(rows)
+}
+
+fn csv_cell(value: &serde_json::Value) -> String {
+    let plain = match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(value) => value.clone(),
+        other => other.to_string(),
+    };
+    format!("\"{}\"", plain.replace('"', "\"\""))
+}
+
+fn table_csv(rows: &[serde_json::Map<String, serde_json::Value>]) -> String {
+    let Some(first) = rows.first() else {
+        return String::new();
+    };
+    let columns = first.keys().cloned().collect::<Vec<_>>();
+    let mut output = format!(
+        "{}\r\n",
+        columns.iter().map(|value| csv_cell(&value.clone().into())).collect::<Vec<_>>().join(",")
+    );
+    for row in rows {
+        output.push_str(
+            &columns
+                .iter()
+                .map(|column| csv_cell(row.get(column).unwrap_or(&serde_json::Value::Null)))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        output.push_str("\r\n");
+    }
+    output
+}
+
+fn safe_export_name(value: &str) -> String {
+    let cleaned = value
+        .chars()
+        .map(|character| if character.is_alphanumeric() || matches!(character, '-' | '_' | '.') { character } else { '_' })
+        .collect::<String>();
+    if cleaned.trim_matches('_').is_empty() { "dokument".into() } else { cleaned }
+}
+
+#[tauri::command]
+fn create_data_export(
+    app: tauri::AppHandle,
+    format: String,
+    include_originals: bool,
+    folder_layout: String,
+) -> Result<DataExportResult, String> {
+    let data_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    initialize_vault_at(&data_root).map_err(|error| error.to_string())?;
+    create_data_export_at(&data_root, &format, include_originals, &folder_layout)
+}
+
+fn create_data_export_at(
+    data_root: &Path,
+    format: &str,
+    include_originals: bool,
+    folder_layout: &str,
+) -> Result<DataExportResult, String> {
+    if !["json", "csv", "package"].contains(&format) {
+        return Err("Exportformat måste vara json, csv eller package".into());
+    }
+    if !["flat", "vault", "type"].contains(&folder_layout) {
+        return Err("Mappstruktur måste vara flat, vault eller type".into());
+    }
+    let connection = Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
+    let mut tables = serde_json::Map::new();
+    let mut row_count = 0;
+    for table in EXPORT_TABLES {
+        let rows = export_table_rows(&connection, table)?;
+        row_count += rows.len();
+        tables.insert((*table).into(), serde_json::Value::Array(rows.into_iter().map(serde_json::Value::Object).collect()));
+    }
+    let manifest = serde_json::json!({
+        "format": "vault-data-export",
+        "version": 1,
+        "schema_version": current_schema_version(&connection).map_err(|error| error.to_string())?,
+        "created_at_epoch_seconds": epoch_seconds(),
+        "folder_layout": folder_layout,
+        "includes_originals": include_originals,
+        "stable_ids": true,
+        "tables": tables
+    });
+    let export_root = data_root.join("exports");
+    fs::create_dir_all(&export_root).map_err(|error| error.to_string())?;
+    let stamp = epoch_seconds();
+    if format == "json" {
+        let path = export_root.join(format!("vault-data-{stamp}.json"));
+        fs::write(&path, serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        return Ok(DataExportResult { export_path: path.to_string_lossy().into_owned(), format: format.into(), table_count: EXPORT_TABLES.len(), row_count, file_count: 0, sha256: Some(sha256_file(&path).map_err(|error| error.to_string())?) });
+    }
+    let directory = export_root.join(format!("vault-data-{stamp}"));
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    for table in EXPORT_TABLES {
+        let rows = manifest["tables"][*table].as_array().cloned().unwrap_or_default();
+        let objects = rows.into_iter().filter_map(|value| value.as_object().cloned()).collect::<Vec<_>>();
+        fs::write(directory.join(format!("{table}.csv")), table_csv(&objects)).map_err(|error| error.to_string())?;
+    }
+    fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let mut file_count = 0;
+    if include_originals {
+        let mut statement = connection.prepare(
+            "SELECT f.storage_path,f.original_name,d.document_type,d.id FROM documents d JOIN document_versions v ON v.document_id=d.id AND v.is_current_file=1 JOIN files f ON f.id=v.file_id WHERE d.trashed_at IS NULL ORDER BY d.id,f.id"
+        ).map_err(|error| error.to_string())?;
+        let files = statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?)))
+            .map_err(|error| error.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|error| error.to_string())?;
+        for (storage_path, original_name, document_type, document_id) in files {
+            let source = data_root.join(storage_path);
+            if !source.is_file() { continue; }
+            let name = format!("{document_id}-{}", safe_export_name(&original_name));
+            let target = match folder_layout {
+                "flat" => directory.join("documents").join(name),
+                "type" => directory.join("documents").join(safe_export_name(&document_type)).join(name),
+                _ => directory.join("documents").join(format!("{document_id}")).join(safe_export_name(&original_name)),
+            };
+            if let Some(parent) = target.parent() { fs::create_dir_all(parent).map_err(|error| error.to_string())?; }
+            fs::copy(source, target).map_err(|error| error.to_string())?;
+            file_count += 1;
+        }
+    }
+    if format == "csv" {
+        return Ok(DataExportResult { export_path: directory.to_string_lossy().into_owned(), format: format.into(), table_count: EXPORT_TABLES.len(), row_count, file_count, sha256: None });
+    }
+    let archive_path = export_root.join(format!("vault-data-{stamp}.vaultzip"));
+    let output = fs::File::create(&archive_path).map_err(|error| error.to_string())?;
+    let mut zip = zip::ZipWriter::new(output);
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let mut entries = Vec::new();
+    collect_backup_entries(&directory, &directory, &mut entries)?;
+    for (path, relative) in &entries {
+        zip.start_file(relative, options).map_err(|error| error.to_string())?;
+        let mut input = fs::File::open(path).map_err(|error| error.to_string())?;
+        std::io::copy(&mut input, &mut zip).map_err(|error| error.to_string())?;
+    }
+    zip.finish().map_err(|error| error.to_string())?;
+    let _ = fs::remove_dir_all(&directory);
+    let hash = sha256_file(&archive_path).map_err(|error| error.to_string())?;
+    record_audit_event(&connection, "data_export_created", "export", None, &format!("{format}; {row_count} rows; {file_count} originals")).map_err(|error| error.to_string())?;
+    Ok(DataExportResult { export_path: archive_path.to_string_lossy().into_owned(), format: format.into(), table_count: EXPORT_TABLES.len(), row_count, file_count, sha256: Some(hash) })
 }
 
 #[tauri::command]
@@ -11461,6 +11666,7 @@ pub fn run() {
             restore_password_backup,
             test_backup_restore,
             create_portable_archive,
+            create_data_export,
             restore_portable_archive,
             scan_file_integrity,
             decide_duplicate,
@@ -12492,6 +12698,35 @@ fn creates_valid_portable_archive_and_scans_integrity() {
             .len(),
         1
     );
+}
+
+#[test]
+fn exports_complete_json_csv_and_vaultzip_data_sets() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    initialize_vault_at(temp.path()).expect("initialize");
+    let source = temp.path().join("export-original.txt");
+    fs::write(&source, "DAGAB anställningsavtal 2026-06-01").expect("source");
+    import_document_at(temp.path(), &source).expect("import");
+
+    let json = create_data_export_at(temp.path(), "json", false, "vault").expect("json");
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&json.export_path).expect("read json")).expect("parse");
+    assert_eq!(value["format"], "vault-data-export");
+    assert_eq!(value["version"], 1);
+    assert_eq!(value["tables"]["documents"].as_array().map(Vec::len), Some(1));
+    assert!(json.sha256.is_some());
+
+    let csv = create_data_export_at(temp.path(), "csv", true, "type").expect("csv");
+    assert!(Path::new(&csv.export_path).join("documents.csv").is_file());
+    assert_eq!(csv.file_count, 1);
+
+    let package = create_data_export_at(temp.path(), "package", true, "flat").expect("package");
+    let file = fs::File::open(&package.export_path).expect("vaultzip");
+    let mut archive = zip::ZipArchive::new(file).expect("zip");
+    assert!(archive.by_name("manifest.json").is_ok());
+    assert!(archive.by_name("documents.csv").is_ok());
+    assert!(archive.file_names().any(|name| name.starts_with("documents/")));
+    assert!(create_data_export_at(temp.path(), "xml", false, "vault").is_err());
 }
 
 #[test]

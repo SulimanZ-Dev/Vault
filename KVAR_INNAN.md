@@ -25,9 +25,9 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 ## 3. Sökning och sparade sökningar
 - [x] ✅ Fritextsökning med FTS5
 - [x] ✅ Sökoperatorer (type:, tag:, date:, status:, -ord, exakt fras)
-- [ ] ❌ Språkstöd (svenska böjningsformer, sammansättningar, OCR-fel)
-- [ ] ❌ Filter (kombinerbara: dokumenttyp, kategori, arbetsgivare, år, datumintervall, etc.)
-- [ ] ❌ Sparade sökningar som dynamiska samlingar
+- [ ] 🔷 Deterministiskt språkstöd för vanliga svenska böjningsformer, sammansättningar, synonymer och OCR-felen 0/o samt 1/l
+- [x] ✅ Kombinerbara filter för dokumenttyp, kategori, arbetsgivare/entitet, status, filformat och datumintervall
+- [x] ✅ Sparade sökningar körs dynamiskt mot aktuellt lokalt arkiv och kan fästas i navigationen
 - [ ] ❌ Import av layout, sökningar, teman, kodord, regler
 
 ## 4. Analys, regler och bakgrundsjobb

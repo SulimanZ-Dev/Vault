@@ -961,6 +961,11 @@ struct ParsedSearchQuery {
     tag: Option<String>,
     date: Option<String>,
     inbox_status: Option<String>,
+    category: Option<String>,
+    entity: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
+    mime_type: Option<String>,
 }
 
 #[tauri::command]
@@ -10793,6 +10798,11 @@ fn search_documents(connection: &Connection, query: &str) -> rusqlite::Result<Ve
         && parsed.tag.is_none()
         && parsed.date.is_none()
         && parsed.inbox_status.is_none()
+        && parsed.category.is_none()
+        && parsed.entity.is_none()
+        && parsed.date_from.is_none()
+        && parsed.date_to.is_none()
+        && parsed.mime_type.is_none()
         && parsed.negative_terms.is_empty()
     {
         return Ok(documents
@@ -10838,15 +10848,26 @@ fn search_documents(connection: &Connection, query: &str) -> rusqlite::Result<Ve
                 score += 5;
                 reasons.push("Filtrerad på status".to_string());
             }
-            if query_plan.is_empty()
-                && (!parsed.exact_phrases.is_empty()
-                    || !parsed.negative_terms.is_empty()
-                    || parsed.document_type.is_some()
-                    || parsed.tag.is_some()
-                    || parsed.date.is_some()
-                    || parsed.inbox_status.is_some())
-                && score == 0
-            {
+            let has_filter = !parsed.exact_phrases.is_empty()
+                || !parsed.negative_terms.is_empty()
+                || parsed.document_type.is_some()
+                || parsed.tag.is_some()
+                || parsed.date.is_some()
+                || parsed.inbox_status.is_some()
+                || parsed.category.is_some()
+                || parsed.entity.is_some()
+                || parsed.date_from.is_some()
+                || parsed.date_to.is_some()
+                || parsed.mime_type.is_some();
+            if parsed.category.is_some() || parsed.entity.is_some() || parsed.mime_type.is_some() {
+                score += 8;
+                reasons.push("Kombinerat metadatafilter matchade".to_string());
+            }
+            if parsed.date_from.is_some() || parsed.date_to.is_some() {
+                score += 7;
+                reasons.push("Datumintervall matchade".to_string());
+            }
+            if query_plan.is_empty() && has_filter && score == 0 {
                 score = 1;
             }
             (score > 0).then_some(SearchResult {
@@ -10903,6 +10924,28 @@ fn parse_search_query(query: &str) -> ParsedSearchQuery {
             parsed.date = Some(normalize(value).trim().to_string());
         } else if let Some(value) = part.strip_prefix("status:") {
             parsed.inbox_status = Some(normalize(value).trim().to_string());
+        } else if let Some(value) = part
+            .strip_prefix("category:")
+            .or_else(|| part.strip_prefix("kategori:"))
+        {
+            parsed.category = Some(normalize(value).trim().to_string());
+        } else if let Some(value) = part
+            .strip_prefix("entity:")
+            .or_else(|| part.strip_prefix("arbetsgivare:"))
+        {
+            parsed.entity = Some(normalize(value).trim().to_string());
+        } else if let Some(value) = part
+            .strip_prefix("from:")
+            .or_else(|| part.strip_prefix("fran:"))
+        {
+            parsed.date_from = Some(value.trim().to_string());
+        } else if let Some(value) = part
+            .strip_prefix("to:")
+            .or_else(|| part.strip_prefix("till:"))
+        {
+            parsed.date_to = Some(value.trim().to_string());
+        } else if let Some(value) = part.strip_prefix("mime:") {
+            parsed.mime_type = Some(normalize(value).trim().to_string());
         } else if part.starts_with('-') && part.len() > 1 {
             parsed
                 .negative_terms
@@ -10977,6 +11020,40 @@ fn document_matches_filters(
             return Ok(false);
         }
     }
+    if let Some(category) = &parsed.category {
+        let matches: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM document_categories dc JOIN categories c ON c.id=dc.category_id WHERE dc.document_id=?1 AND lower(c.name) LIKE ?2)",params![document.id,format!("%{category}%")],|row|row.get(0))?;
+        if !matches {
+            return Ok(false);
+        }
+    }
+    if let Some(entity) = &parsed.entity {
+        let matches: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM document_entities de JOIN entities e ON e.id=de.entity_id WHERE de.document_id=?1 AND lower(e.display_name) LIKE ?2)",params![document.id,format!("%{entity}%")],|row|row.get(0))?;
+        if !matches {
+            return Ok(false);
+        }
+    }
+    if parsed.date_from.as_ref().is_some_and(|from| {
+        document
+            .document_date
+            .as_deref()
+            .is_none_or(|date| date < from.as_str())
+    }) {
+        return Ok(false);
+    }
+    if parsed.date_to.as_ref().is_some_and(|to| {
+        document
+            .document_date
+            .as_deref()
+            .is_none_or(|date| date > to.as_str())
+    }) {
+        return Ok(false);
+    }
+    if let Some(mime_type) = &parsed.mime_type {
+        let matches: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM document_versions dv JOIN files f ON f.id=dv.file_id WHERE dv.document_id=?1 AND dv.is_current_file=1 AND lower(f.mime_type) LIKE ?2)",params![document.id,format!("%{mime_type}%")],|row|row.get(0))?;
+        if !matches {
+            return Ok(false);
+        }
+    }
     Ok(true)
 }
 
@@ -10985,6 +11062,20 @@ fn build_query_plan(query: &str) -> Vec<String> {
 
     for token in tokenize(query) {
         push_unique(&mut tokens, token.as_str());
+        for suffix in [
+            "arnas", "ernas", "orna", "arna", "ande", "ning", "ens", "ets", "er", "ar", "or", "en",
+            "et", "s",
+        ] {
+            if token.len() > suffix.len() + 3 && token.ends_with(suffix) {
+                push_unique(&mut tokens, &token[..token.len() - suffix.len()]);
+            }
+        }
+        if token.contains('0') {
+            push_unique(&mut tokens, &token.replace('0', "o"));
+        }
+        if token.contains('1') {
+            push_unique(&mut tokens, &token.replace('1', "l"));
+        }
 
         match token.as_str() {
             "kontrakt" => {
@@ -11003,6 +11094,16 @@ fn build_query_plan(query: &str) -> Vec<String> {
             }
             "dagab" => {
                 push_unique(&mut tokens, "dagab");
+            }
+            "kvitto" | "kvitton" => {
+                push_unique(&mut tokens, "kvitto");
+                push_unique(&mut tokens, "betalning");
+                push_unique(&mut tokens, "inkop");
+            }
+            "bil" | "fordon" => {
+                push_unique(&mut tokens, "fordon");
+                push_unique(&mut tokens, "registreringsnummer");
+                push_unique(&mut tokens, "vin");
             }
             _ => {}
         }
@@ -12102,6 +12203,22 @@ fn parses_and_validates_td3_mrz_without_guessing_names() {
     assert_eq!(fields["given_names"], "ANNA MARIA");
     assert_eq!(fields["birth_date"], "1974-08-12");
     assert_eq!(fields["expiry_date"], "2012-04-15");
+}
+
+#[test]
+fn parses_combined_search_filters_and_swedish_variants() {
+    let parsed = parse_search_query(
+        "avtalen kategori:arbete arbetsgivare:DAGAB fran:2024-01-01 till:2024-12-31 mime:pdf",
+    );
+    assert_eq!(parsed.category.as_deref(), Some("arbete"));
+    assert_eq!(parsed.entity.as_deref(), Some("dagab"));
+    assert_eq!(parsed.date_from.as_deref(), Some("2024-01-01"));
+    assert_eq!(parsed.date_to.as_deref(), Some("2024-12-31"));
+    assert_eq!(parsed.mime_type.as_deref(), Some("pdf"));
+    let plan = build_query_plan("avtalen kvitton f0rdon");
+    assert!(plan.iter().any(|term| term == "avtal"));
+    assert!(plan.iter().any(|term| term == "kvitto"));
+    assert!(plan.iter().any(|term| term == "fordon"));
 }
 
 #[test]

@@ -1948,6 +1948,45 @@ fn extract_domain_fields(domain_type: &str, text: &str) -> serde_json::Value {
             ("instructions", "instruktioner"),
             ("contact", "kontaktuppgifter"),
         ],
+        "identity" => &[
+            ("document_number", "dokumentnummer"),
+            ("personal_number", "personnummer"),
+            ("nationality", "nationalitet"),
+            ("surname", "efternamn"),
+            ("given_names", "fornamn"),
+        ],
+        "vehicle" => &[
+            ("registration_number", "registreringsnummer"),
+            ("vin", "vin"),
+            ("make", "marke"),
+            ("model", "modell"),
+            ("model_year", "arsmodell"),
+            ("mileage", "miltal"),
+            ("workshop", "verkstad"),
+            ("service_category", "service"),
+            ("next_service", "nasta service"),
+        ],
+        "employment" => &[
+            ("employer", "arbetsgivare"),
+            ("employer_alias", "arbetsgivaralias"),
+            ("organization_number", "organisationsnummer"),
+            ("position", "befattning"),
+            ("employment_type", "anstallningsform"),
+            ("employment_rate", "sysselsattningsgrad"),
+            ("monthly_salary", "manadslon"),
+            ("hourly_salary", "timlon"),
+            ("supplementary_agreement", "tillaggsavtal"),
+        ],
+        "product" => &[
+            ("product_name", "produkt"),
+            ("model", "modell"),
+            ("serial_number", "serienummer"),
+            ("purchase_date", "inkopsdatum"),
+            ("store", "butik"),
+            ("warranty_period", "garantitid"),
+            ("warranty_end", "garantin upphor"),
+            ("complaint", "reklamation"),
+        ],
         _ => &[],
     };
     let mut map = serde_json::Map::new();
@@ -1967,7 +2006,91 @@ fn extract_domain_fields(domain_type: &str, text: &str) -> serde_json::Value {
             }
         }
     }
+    if domain_type == "identity" {
+        if let Some(mrz) = parse_td3_mrz(text) {
+            for (key, value) in mrz {
+                map.entry(key).or_insert(value);
+            }
+        }
+    }
     serde_json::Value::Object(map)
+}
+
+fn mrz_check_digit(value: &str) -> char {
+    const WEIGHTS: [u32; 3] = [7, 3, 1];
+    let sum = value
+        .chars()
+        .enumerate()
+        .map(|(index, character)| {
+            let digit = match character {
+                '0'..='9' => character as u32 - '0' as u32,
+                'A'..='Z' => character as u32 - 'A' as u32 + 10,
+                '<' => 0,
+                _ => 0,
+            };
+            digit * WEIGHTS[index % 3]
+        })
+        .sum::<u32>();
+    char::from_digit(sum % 10, 10).unwrap_or('0')
+}
+
+fn mrz_date(value: &str, expiry: bool) -> Option<String> {
+    if value.len() != 6 || !value.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    let year = value[0..2].parse::<i32>().ok()?;
+    let full_year = if expiry || year <= 30 {
+        2000 + year
+    } else {
+        1900 + year
+    };
+    let candidate = format!("{full_year:04}-{}-{}", &value[2..4], &value[4..6]);
+    is_valid_iso_date(&candidate).then_some(candidate)
+}
+
+fn parse_td3_mrz(text: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let lines = text
+        .lines()
+        .map(|line| line.trim().to_uppercase())
+        .filter(|line| line.len() == 44)
+        .collect::<Vec<_>>();
+    let pair = lines.windows(2).find(|lines| lines[0].starts_with("P<"))?;
+    let first = &pair[0];
+    let second = &pair[1];
+    let document_number = second[0..9].trim_matches('<');
+    let birth = &second[13..19];
+    let expiry = &second[21..27];
+    let valid = mrz_check_digit(&second[0..9]) == second.chars().nth(9)?
+        && mrz_check_digit(birth) == second.chars().nth(19)?
+        && mrz_check_digit(expiry) == second.chars().nth(27)?;
+    let names = first[5..].split("<<").collect::<Vec<_>>();
+    let mut fields = serde_json::Map::new();
+    fields.insert("mrz_valid".into(), serde_json::Value::Bool(valid));
+    fields.insert("document_number".into(), document_number.into());
+    fields.insert(
+        "issuing_country".into(),
+        first[2..5].trim_matches('<').into(),
+    );
+    fields.insert(
+        "surname".into(),
+        names.first()?.replace('<', " ").trim().into(),
+    );
+    fields.insert(
+        "given_names".into(),
+        names.get(1).unwrap_or(&"").replace('<', " ").trim().into(),
+    );
+    fields.insert(
+        "nationality".into(),
+        second[10..13].trim_matches('<').into(),
+    );
+    if let Some(value) = mrz_date(birth, false) {
+        fields.insert("birth_date".into(), value.into());
+    }
+    if let Some(value) = mrz_date(expiry, true) {
+        fields.insert("expiry_date".into(), value.into());
+    }
+    fields.insert("gender".into(), second[20..21].trim_matches('<').into());
+    Some(fields)
 }
 
 fn is_valid_iso_date(value: &str) -> bool {
@@ -6982,17 +7105,28 @@ fn resolve_conflict(
     let connection =
         Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
     let decision = match decision.trim() {
-        "resolved" | "ignored" => decision.trim(),
+        "source_a" | "source_b" | "both" | "neither" | "unresolved" => decision.trim(),
         _ => return Err("Ogiltigt konfliktbeslut".to_string()),
+    };
+    let conflict_status = if decision == "unresolved" {
+        "ignored"
+    } else {
+        "resolved"
     };
     let changed = connection.execute(
         "UPDATE conflicts SET status = ?1, resolution = ?2, locked = ?3, resolved_at = CURRENT_TIMESTAMP
          WHERE id = ?4 AND vault_id = 1 AND status = 'open'",
-        params![decision, note.trim().chars().take(1000).collect::<String>(), locked, conflict_id],
+        params![conflict_status, format!("{decision}: {}", note.trim().chars().take(1000).collect::<String>()), locked, conflict_id],
     ).map_err(|error| error.to_string())?;
     if changed == 0 {
         return Err("Konflikten finns inte eller är redan behandlad".to_string());
     }
+    connection.execute(
+        "INSERT INTO conflict_decisions(conflict_id,chosen_source,chosen_value,decision_type,user_note,is_locked)
+         VALUES(?1,?2,NULL,?2,?3,?4)
+         ON CONFLICT(conflict_id) DO UPDATE SET chosen_source=excluded.chosen_source,decision_type=excluded.decision_type,user_note=excluded.user_note,is_locked=excluded.is_locked,created_at=CURRENT_TIMESTAMP",
+        params![conflict_id, decision, note.trim(), locked],
+    ).map_err(|error| error.to_string())?;
     connection.execute(
         "INSERT INTO user_verifications (vault_id, target_type, target_id, decision, note, locked)
          VALUES (1, 'conflict', ?1, ?2, ?3, ?4)",
@@ -11938,6 +12072,32 @@ fn extracts_extended_domain_fields_without_inference() {
     assert_eq!(authority["authority"], "Skatteverket");
     assert_eq!(authority["case_number"], "ABC-123");
     assert!(authority.get("legal_effect").is_none());
+    let vehicle = extract_domain_fields(
+        "vehicle",
+        "Registreringsnummer: ABC123\nVIN: YV1TS592081234567\nMiltal: 12 450\nVerkstad: Lokal Motor AB",
+    );
+    assert_eq!(vehicle["registration_number"], "ABC123");
+    assert_eq!(vehicle["vin"], "YV1TS592081234567");
+    let employment = extract_domain_fields(
+        "employment",
+        "Arbetsgivare: DAGAB AB\nOrganisationsnummer: 556004-7903\nBefattning: Lagerarbetare\nSysselsättningsgrad: 100 %",
+    );
+    assert_eq!(employment["employer"], "DAGAB AB");
+    assert_eq!(employment["employment_rate"], "100 %");
+}
+
+#[test]
+fn parses_and_validates_td3_mrz_without_guessing_names() {
+    let fields = extract_domain_fields(
+        "identity",
+        "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<\nL898902C36UTO7408122F1204159ZE184226B<<<<<10",
+    );
+    assert_eq!(fields["mrz_valid"], true);
+    assert_eq!(fields["document_number"], "L898902C3");
+    assert_eq!(fields["surname"], "ERIKSSON");
+    assert_eq!(fields["given_names"], "ANNA MARIA");
+    assert_eq!(fields["birth_date"], "1974-08-12");
+    assert_eq!(fields["expiry_date"], "2012-04-15");
 }
 
 #[test]

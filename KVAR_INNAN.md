@@ -15,12 +15,12 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 ## 2. Djupare områdesmodeller
 - [x] ✅ Grundläggande domänregister (schema v11)
 - [x] ✅ Boende-, rese- och myndighetsvyer (schema v19)
-- [ ] ❌ MRZ-parser för pass/ID
-- [ ] ❌ Fordon och service (VIN, regnummer, servicehistorik)
-- [ ] ❌ Garanti och produkter (garantiperiod, beräknat slut, reklamation)
-- [ ] ❌ Anställning (arbetsgivaralias, organisationsnummer, befattning, sysselsättningsgrad)
-- [ ] ❌ Lönehistorik och tilläggsavtal
-- [ ] ❌ Konfliktgranskning (användare väljer källa, sparar beslut)
+- [ ] 🔷 Deterministisk TD3-MRZ-parser för pass med kontrollsiffror och källfält
+- [ ] 🔶 Fordon och service (schema samt lokalt utdrag av VIN, regnummer, miltal och verkstad)
+- [ ] 🔶 Garanti och produkter (schema samt lokalt utdrag av garantiperiod, slut och reklamation)
+- [ ] 🔶 Anställning (schema samt lokalt utdrag av alias, organisationsnummer, befattning och sysselsättningsgrad)
+- [ ] 🔶 Lönehistorik och tilläggsavtal (separata historiktabeller och lokala källfält)
+- [ ] 🔷 Konfliktgranskning där användaren väljer källa/båda/ingen och beslutet låses
 
 ## 3. Sökning och sparade sökningar
 - [x] ✅ Fritextsökning med FTS5

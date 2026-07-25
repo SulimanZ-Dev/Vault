@@ -1734,14 +1734,14 @@ function App() {
   async function handleCompareVersions(){if(versionSelection.length!==2||!selectedDocumentId)return;try{setVersionComparison(await invoke('compare_document_versions',{documentId:selectedDocumentId,leftVersionId:versionSelection[0],rightVersionId:versionSelection[1]}));setWorkflowError(null)}catch(error){setWorkflowError(String(error))}}
   async function handleRestoreVersion(versionId:number){if(!selectedDocumentId||!window.confirm('Gör denna version aktuell? Nuvarande version sparas i historiken.'))return;try{setVersions(await invoke('restore_document_version',{documentId:selectedDocumentId,versionId}));setDocumentDetail(await invoke('get_production_document_detail',{documentId:selectedDocumentId}));setDocumentPages(await invoke('list_document_pages',{documentId:selectedDocumentId}));await refreshOperationalData()}catch(error){setWorkflowError(String(error))}}
 
-  async function handleResolveConflict(conflictId: number, decision: 'resolved' | 'ignored') {
+  async function handleResolveConflict(conflictId: number, decision: 'source_a' | 'source_b' | 'both' | 'neither' | 'unresolved') {
     setWorkflowError(null)
     try {
       const items = await invoke<ConflictSummary[]>('resolve_conflict', {
         conflictId,
         decision,
-        note: decision === 'resolved' ? 'Manuellt granskat i Vault' : 'Ignorerat av användaren',
-        locked: decision === 'resolved',
+        note: `Användaren valde ${decision} efter manuell källgranskning`,
+        locked: decision !== 'unresolved',
       })
       setConflicts(items)
     } catch (error) {
@@ -2554,8 +2554,11 @@ function App() {
                       </small>
                       {conflict.status === 'open' && conflict.id ? (
                         <div className="claim-actions">
-                          <button className="mini-action" onClick={() => handleResolveConflict(conflict.id!, 'resolved')} type="button">Markera löst och lås</button>
-                          <button className="mini-action" onClick={() => handleResolveConflict(conflict.id!, 'ignored')} type="button">Ignorera</button>
+                          <button className="mini-action" onClick={() => handleResolveConflict(conflict.id!, 'source_a')} type="button">Välj källa A</button>
+                          <button className="mini-action" onClick={() => handleResolveConflict(conflict.id!, 'source_b')} type="button">Välj källa B</button>
+                          <button className="mini-action" onClick={() => handleResolveConflict(conflict.id!, 'both')} type="button">Behåll båda</button>
+                          <button className="mini-action" onClick={() => handleResolveConflict(conflict.id!, 'neither')} type="button">Avvisa båda</button>
+                          <button className="mini-action" onClick={() => handleResolveConflict(conflict.id!, 'unresolved')} type="button">Lämna olöst</button>
                         </div>
                       ) : <small>{conflict.resolution ?? 'Behandlad'}</small>}
                     </div>

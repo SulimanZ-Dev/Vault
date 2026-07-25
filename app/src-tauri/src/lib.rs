@@ -46,6 +46,7 @@ const BACKUP_DESTINATIONS_MIGRATION: &str =
 const DOMAIN_MODELS_MIGRATION: &str = include_str!("../migrations/0027_domain_models.sql");
 const VIEWER_COORDINATES_MIGRATION: &str =
     include_str!("../migrations/0028_viewer_coordinates.sql");
+const JOBS_RULES_BATCH_MIGRATION: &str = include_str!("../migrations/0029_jobs_rules_batch.sql");
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (1, "initial local vault schema", INITIAL_MIGRATION),
     (
@@ -134,6 +135,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         28,
         "normalized viewer coordinates and claim source links",
         VIEWER_COORDINATES_MIGRATION,
+    ),
+    (
+        29,
+        "unified jobs compound rules and batch actions",
+        JOBS_RULES_BATCH_MIGRATION,
     ),
 ];
 
@@ -233,6 +239,13 @@ struct AutomationRuleSummary {
     action_value: String,
     approval_policy: String,
     version: i64,
+}
+
+#[derive(Deserialize)]
+struct RuleCondition {
+    field: String,
+    operator: String,
+    value: String,
 }
 
 #[derive(Serialize)]
@@ -2550,15 +2563,25 @@ fn save_automation_rule(
     action_type: String,
     action_value: String,
     approval_policy: String,
+    logic_operator: String,
+    conditions_json: String,
+    actions_json: String,
 ) -> Result<Vec<AutomationRuleSummary>, String> {
     if name.trim().is_empty() || match_value.trim().is_empty() || action_value.trim().is_empty() {
         return Err("Namn, matchningsvärde och åtgärdsvärde krävs".into());
     }
+    if !matches!(logic_operator.as_str(), "AND" | "OR" | "NOT") {
+        return Err("Logiken måste vara AND, OR eller NOT".into());
+    }
+    serde_json::from_str::<Vec<RuleCondition>>(&conditions_json)
+        .map_err(|_| "Villkoren är inte giltig JSON".to_string())?;
+    serde_json::from_str::<serde_json::Value>(&actions_json)
+        .map_err(|_| "Åtgärderna är inte giltig JSON".to_string())?;
     let connection = production_connection(&app)?;
     if let Some(id) = id {
-        connection.execute("UPDATE automation_rules SET name=?1, enabled=?2, priority=?3, match_field=?4, match_operator=?5, match_value=?6, action_type=?7, action_value=?8, approval_policy=?9, version=version+1, updated_at=CURRENT_TIMESTAMP WHERE id=?10", params![name.trim(), i64::from(enabled), priority, match_field, match_operator, match_value.trim(), action_type, action_value.trim(), approval_policy, id]).map_err(|e| e.to_string())?;
+        connection.execute("UPDATE automation_rules SET name=?1, enabled=?2, priority=?3, match_field=?4, match_operator=?5, match_value=?6, action_type=?7, action_value=?8, approval_policy=?9, logic_operator=?10, conditions_json=?11, actions_json=?12, version=version+1, updated_at=CURRENT_TIMESTAMP WHERE id=?13", params![name.trim(), i64::from(enabled), priority, match_field, match_operator, match_value.trim(), action_type, action_value.trim(), approval_policy, logic_operator, conditions_json, actions_json, id]).map_err(|e| e.to_string())?;
     } else {
-        connection.execute("INSERT INTO automation_rules (name, enabled, priority, match_field, match_operator, match_value, action_type, action_value, approval_policy) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![name.trim(), i64::from(enabled), priority, match_field, match_operator, match_value.trim(), action_type, action_value.trim(), approval_policy]).map_err(|e| e.to_string())?;
+        connection.execute("INSERT INTO automation_rules (name, enabled, priority, match_field, match_operator, match_value, action_type, action_value, approval_policy,logic_operator,conditions_json,actions_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", params![name.trim(), i64::from(enabled), priority, match_field, match_operator, match_value.trim(), action_type, action_value.trim(), approval_policy,logic_operator,conditions_json,actions_json]).map_err(|e| e.to_string())?;
     }
     record_audit_event(
         &connection,
@@ -2593,6 +2616,102 @@ fn delete_automation_rule(
     list_automation_rules(app)
 }
 
+#[tauri::command]
+fn apply_batch_action(
+    app: tauri::AppHandle,
+    document_ids: Vec<i64>,
+    action_type: String,
+    action_value: String,
+) -> Result<Vec<DocumentSummary>, String> {
+    let data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    apply_batch_action_at(&data_root, document_ids, &action_type, &action_value)
+}
+
+fn apply_batch_action_at(
+    data_root: &Path,
+    document_ids: Vec<i64>,
+    action_type: &str,
+    action_value: &str,
+) -> Result<Vec<DocumentSummary>, String> {
+    let mut ids = document_ids
+        .into_iter()
+        .filter(|id| *id > 0)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() || ids.len() > 10_000 {
+        return Err("Välj mellan 1 och 10 000 dokument".into());
+    }
+    if !matches!(
+        action_type,
+        "add_tag" | "archive" | "review" | "set_document_type"
+    ) {
+        return Err("Batchåtgärden stöds inte".into());
+    }
+    if matches!(action_type, "add_tag" | "set_document_type") && action_value.trim().is_empty() {
+        return Err("Åtgärdsvärde krävs".into());
+    }
+    initialize_vault_at(data_root).map_err(|error| error.to_string())?;
+    let mut connection =
+        Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
+    let tx = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let mut affected = 0_i64;
+    for document_id in &ids {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM documents WHERE id=?1 AND vault_id=1 AND trashed_at IS NULL)",
+            [document_id],
+            |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if !exists {
+            continue;
+        }
+        match action_type {
+            "add_tag" => {
+                tx.execute(
+                    "INSERT OR IGNORE INTO tags(vault_id,name) VALUES(1,?1)",
+                    [action_value.trim()],
+                )
+                .map_err(|error| error.to_string())?;
+                tx.execute("INSERT OR IGNORE INTO document_tags(document_id,tag_id) SELECT ?1,id FROM tags WHERE vault_id=1 AND name=?2", params![document_id,action_value.trim()]).map_err(|error| error.to_string())?;
+            }
+            "archive" | "review" => {
+                let status = if action_type == "archive" {
+                    "archived"
+                } else {
+                    "review"
+                };
+                tx.execute(
+                    "UPDATE documents SET inbox_status=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2",
+                    params![status, document_id],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            "set_document_type" => {
+                tx.execute("UPDATE documents SET document_type=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2",params![action_value.trim(),document_id]).map_err(|error| error.to_string())?;
+            }
+            _ => unreachable!(),
+        }
+        tx.execute("INSERT INTO dirty_documents(document_id,reason,dependency_kind) VALUES(?1,?2,'batch') ON CONFLICT(document_id) DO UPDATE SET reason=excluded.reason,dependency_kind='batch',marked_at=CURRENT_TIMESTAMP",params![document_id,action_type]).map_err(|error| error.to_string())?;
+        affected += 1;
+    }
+    tx.execute("INSERT INTO batch_runs(action_type,action_value,document_ids_json,affected_count,status) VALUES(?1,?2,?3,?4,'completed')",params![action_type,action_value.trim(),serde_json::to_string(&ids).unwrap_or_else(|_|"[]".into()),affected]).map_err(|error| error.to_string())?;
+    record_audit_event(
+        &tx,
+        "batch_action_completed",
+        "vault",
+        None,
+        &format!("Batch action completed for {affected} documents"),
+    )
+    .map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())?;
+    list_production_documents_at(data_root).map_err(|error| error.to_string())
+}
+
 fn rule_matches(
     field: &str,
     operator: &str,
@@ -2616,11 +2735,43 @@ fn rule_matches(
     }
 }
 
+fn compound_rule_matches(
+    logic: &str,
+    conditions_json: &str,
+    title: &str,
+    document_type: &str,
+    text: &str,
+) -> bool {
+    let conditions =
+        serde_json::from_str::<Vec<RuleCondition>>(conditions_json).unwrap_or_default();
+    if conditions.is_empty() {
+        return false;
+    }
+    let results = conditions
+        .iter()
+        .map(|condition| {
+            rule_matches(
+                &condition.field,
+                &condition.operator,
+                &condition.value,
+                title,
+                document_type,
+                text,
+            )
+        })
+        .collect::<Vec<_>>();
+    match logic {
+        "OR" => results.iter().any(|matches| *matches),
+        "NOT" => results.iter().all(|matches| !*matches),
+        _ => results.iter().all(|matches| *matches),
+    }
+}
+
 #[tauri::command]
 fn run_automation_rules(app: tauri::AppHandle) -> Result<RuleRunResult, String> {
     let mut connection = production_connection(&app)?;
     let rules = {
-        let mut s = connection.prepare("SELECT id,name,match_field,match_operator,match_value,action_type,action_value,approval_policy FROM automation_rules WHERE enabled=1 ORDER BY priority,id").map_err(|e| e.to_string())?;
+        let mut s = connection.prepare("SELECT id,name,match_field,match_operator,match_value,action_type,action_value,approval_policy,logic_operator,conditions_json FROM automation_rules WHERE enabled=1 ORDER BY priority,id").map_err(|e| e.to_string())?;
         let rows = s
             .query_map([], |r| {
                 Ok((
@@ -2632,6 +2783,8 @@ fn run_automation_rules(app: tauri::AppHandle) -> Result<RuleRunResult, String> 
                     r.get::<_, String>(5)?,
                     r.get::<_, String>(6)?,
                     r.get::<_, String>(7)?,
+                    r.get::<_, String>(8)?,
+                    r.get::<_, String>(9)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -2660,9 +2813,16 @@ fn run_automation_rules(app: tauri::AppHandle) -> Result<RuleRunResult, String> 
     let mut applied = 0;
     let mut explanations = Vec::new();
     let tx = connection.transaction().map_err(|e| e.to_string())?;
-    for (rule_id, name, field, operator, wanted, action, value, policy) in rules {
+    for (rule_id, name, field, operator, wanted, action, value, policy, logic, conditions_json) in
+        rules
+    {
         for (document_id, title, document_type, text) in &documents {
-            if !rule_matches(&field, &operator, &wanted, title, document_type, text) {
+            let matches = if conditions_json == "[]" {
+                rule_matches(&field, &operator, &wanted, title, document_type, text)
+            } else {
+                compound_rule_matches(&logic, &conditions_json, title, document_type, text)
+            };
+            if !matches {
                 continue;
             }
             matched += 1;
@@ -11368,6 +11528,7 @@ pub fn run() {
             save_automation_rule,
             delete_automation_rule,
             run_automation_rules,
+            apply_batch_action,
             list_document_templates,
             save_document_template,
             list_custom_fields,
@@ -11463,7 +11624,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let status = initialize_vault_at(temp_dir.path()).expect("vault initialization");
 
-        assert_eq!(status.schema_version, 28);
+        assert_eq!(status.schema_version, 29);
         assert_eq!(status.testlab_document_count, 4);
         assert!(status.production_vault_ready);
         assert!(PathBuf::from(status.database_path).exists());
@@ -12219,6 +12380,75 @@ fn parses_combined_search_filters_and_swedish_variants() {
     assert!(plan.iter().any(|term| term == "avtal"));
     assert!(plan.iter().any(|term| term == "kvitto"));
     assert!(plan.iter().any(|term| term == "fordon"));
+}
+
+#[test]
+fn applies_audited_batch_actions_and_marks_documents_dirty() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    initialize_vault_at(temp.path()).expect("initialize");
+    let source = temp.path().join("batch-document.txt");
+    fs::write(&source, "Batchdokument för lokal verifiering").expect("fixture");
+    let imported = import_document_at(temp.path(), &source).expect("import");
+    let documents = apply_batch_action_at(
+        temp.path(),
+        vec![imported.document.id],
+        "add_tag",
+        "Batchtest",
+    )
+    .expect("batch tag");
+    assert_eq!(documents.len(), 1);
+    let connection = Connection::open(temp.path().join("vault.db")).expect("database");
+    let tag_count: i64 = connection.query_row("SELECT COUNT(*) FROM document_tags dt JOIN tags t ON t.id=dt.tag_id WHERE dt.document_id=?1 AND t.name='Batchtest'",[imported.document.id],|row|row.get(0)).expect("tag count");
+    assert_eq!(tag_count, 1);
+    let dirty_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM dirty_documents WHERE document_id=?1",
+            [imported.document.id],
+            |row| row.get(0),
+        )
+        .expect("dirty count");
+    assert_eq!(dirty_count, 1);
+    let run_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM batch_runs WHERE affected_count=1 AND status='completed'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("batch run");
+    assert_eq!(run_count, 1);
+}
+
+#[test]
+fn evaluates_compound_rules_with_and_or_not() {
+    let conditions = r#"[{"field":"text","operator":"contains","value":"dagab"},{"field":"document_type","operator":"equals","value":"Anställningsavtal"}]"#;
+    assert!(compound_rule_matches(
+        "AND",
+        conditions,
+        "Avtal",
+        "Anställningsavtal",
+        "Anställning hos DAGAB"
+    ));
+    assert!(compound_rule_matches(
+        "OR",
+        conditions,
+        "Annat",
+        "Kvitto",
+        "DAGAB betalning"
+    ));
+    assert!(compound_rule_matches(
+        "NOT",
+        conditions,
+        "Annat",
+        "Kvitto",
+        "Helt fristående dokument"
+    ));
+    assert!(!compound_rule_matches(
+        "NOT",
+        conditions,
+        "Annat",
+        "Kvitto",
+        "DAGAB betalning"
+    ));
 }
 
 #[test]

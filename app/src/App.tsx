@@ -583,6 +583,9 @@ function App() {
   const [searchFilters,setSearchFilters]=useState({type:'',category:'',employer:'',status:'',mime:'',from:'',to:''})
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [resultWindowStart,setResultWindowStart]=useState(0)
+  const [batchMode,setBatchMode]=useState(false)
+  const [selectedDocumentIds,setSelectedDocumentIds]=useState<number[]>([])
+  const [batchDraft,setBatchDraft]=useState({action:'add_tag',value:''})
   const [lastImport, setLastImport] = useState<ImportResult | null>(null)
   const [documentDetail, setDocumentDetail] = useState<DocumentDetail | null>(null)
   const [importError, setImportError] = useState<string | null>(null)
@@ -603,7 +606,7 @@ function App() {
   const [vaultUnlocked, setVaultUnlocked] = useState(true)
   const [windowsHello,setWindowsHello]=useState<WindowsHelloStatus>({available:false,explanation:'Kontrollerar Windows Hello…'})
   const [lastProtectedExport, setLastProtectedExport] = useState<ProtectedExportResult | null>(null)
-  const [ruleDraft, setRuleDraft] = useState({name:'Avtal får etikett',match_field:'text',match_operator:'contains',match_value:'avtal',action_type:'add_tag',action_value:'Avtal',approval_policy:'suggest'})
+  const [ruleDraft, setRuleDraft] = useState({name:'Avtal får etikett',match_field:'text',match_operator:'contains',match_value:'avtal',logic_operator:'AND',second_field:'title',second_operator:'contains',second_value:'',action_type:'add_tag',action_value:'Avtal',approval_policy:'suggest'})
   const [templateDraft, setTemplateDraft] = useState({name:'',document_type:'',category:'',default_tags:'',required_fields:''})
   const [fieldDraft, setFieldDraft] = useState({name:'',field_type:'text',applies_to:'all',required:false})
   const [searchDraft, setSearchDraft] = useState({name:'',query:'',pinned:true})
@@ -1813,11 +1816,12 @@ function App() {
   }
 
   async function handleSaveRule() {
-    try { setAutomationRules(await invoke('save_automation_rule',{id:null,name:ruleDraft.name,enabled:true,priority:100,matchField:ruleDraft.match_field,matchOperator:ruleDraft.match_operator,matchValue:ruleDraft.match_value,actionType:ruleDraft.action_type,actionValue:ruleDraft.action_value,approvalPolicy:ruleDraft.approval_policy})); setWorkflowError(null) } catch(e){setWorkflowError(String(e))}
+    try {const conditions=[{field:ruleDraft.match_field,operator:ruleDraft.match_operator,value:ruleDraft.match_value},...(ruleDraft.second_value.trim()?[{field:ruleDraft.second_field,operator:ruleDraft.second_operator,value:ruleDraft.second_value}]:[])];setAutomationRules(await invoke('save_automation_rule',{id:null,name:ruleDraft.name,enabled:true,priority:100,matchField:ruleDraft.match_field,matchOperator:ruleDraft.match_operator,matchValue:ruleDraft.match_value,actionType:ruleDraft.action_type,actionValue:ruleDraft.action_value,approvalPolicy:ruleDraft.approval_policy,logicOperator:ruleDraft.logic_operator,conditionsJson:JSON.stringify(conditions),actionsJson:JSON.stringify([{type:ruleDraft.action_type,value:ruleDraft.action_value}])})); setWorkflowError(null) } catch(e){setWorkflowError(String(e))}
   }
   async function handleRunRules() {
     try { setRuleRun(await invoke('run_automation_rules')); setProductionDocuments(await invoke('list_production_documents')); setWorkflowError(null) } catch(e){setWorkflowError(String(e))}
   }
+  async function handleApplyBatch(){if(!selectedDocumentIds.length)return;try{setProductionDocuments(await invoke('apply_batch_action',{documentIds:selectedDocumentIds,actionType:batchDraft.action,actionValue:batchDraft.value}));setSelectedDocumentIds([]);setBatchMode(false);await refreshOperationalData();setWorkflowError(null)}catch(error){setWorkflowError(String(error))}}
   async function handleSaveTemplate() {
     try { setDocumentTemplates(await invoke('save_document_template',{name:templateDraft.name,documentType:templateDraft.document_type,category:templateDraft.category,defaultTags:templateDraft.default_tags,requiredFields:templateDraft.required_fields})); setTemplateDraft({name:'',document_type:'',category:'',default_tags:'',required_fields:''}); setWorkflowError(null) } catch(e){setWorkflowError(String(e))}
   }
@@ -2630,6 +2634,7 @@ function App() {
                     <input aria-label="Regelnamn" value={ruleDraft.name} onChange={e=>setRuleDraft({...ruleDraft,name:e.target.value})}/>
                     <div className="claim-actions"><select value={ruleDraft.match_field} onChange={e=>setRuleDraft({...ruleDraft,match_field:e.target.value})}><option value="text">Dokumenttext</option><option value="title">Titel</option><option value="document_type">Dokumenttyp</option></select><select value={ruleDraft.match_operator} onChange={e=>setRuleDraft({...ruleDraft,match_operator:e.target.value})}><option value="contains">innehåller</option><option value="equals">är exakt</option><option value="starts_with">börjar med</option></select></div>
                     <input aria-label="Matchningsvärde" value={ruleDraft.match_value} onChange={e=>setRuleDraft({...ruleDraft,match_value:e.target.value})}/>
+                    <div className="compound-rule-row"><select aria-label="Villkorslogik" value={ruleDraft.logic_operator} onChange={e=>setRuleDraft({...ruleDraft,logic_operator:e.target.value})}><option value="AND">AND – alla villkor</option><option value="OR">OR – något villkor</option><option value="NOT">NOT – inget villkor</option></select><select value={ruleDraft.second_field} onChange={e=>setRuleDraft({...ruleDraft,second_field:e.target.value})}><option value="text">Dokumenttext</option><option value="title">Titel</option><option value="document_type">Dokumenttyp</option></select><select value={ruleDraft.second_operator} onChange={e=>setRuleDraft({...ruleDraft,second_operator:e.target.value})}><option value="contains">innehåller</option><option value="equals">är exakt</option><option value="starts_with">börjar med</option></select><input aria-label="Andra villkorets värde" placeholder="Valfritt andra villkor" value={ruleDraft.second_value} onChange={e=>setRuleDraft({...ruleDraft,second_value:e.target.value})}/></div>
                     <div className="claim-actions"><select value={ruleDraft.action_type} onChange={e=>setRuleDraft({...ruleDraft,action_type:e.target.value})}><option value="add_tag">Lägg till tagg</option><option value="set_document_type">Sätt dokumenttyp</option><option value="archive">Flytta till arkiv</option></select><input aria-label="Åtgärdsvärde" value={ruleDraft.action_value} onChange={e=>setRuleDraft({...ruleDraft,action_value:e.target.value})}/></div>
                     <select value={ruleDraft.approval_policy} onChange={e=>setRuleDraft({...ruleDraft,approval_policy:e.target.value})}><option value="suggest">Endast föreslå</option><option value="auto">Spara automatiskt</option></select>
                     <div className="claim-actions"><button className="primary-action" onClick={handleSaveRule}>Spara regel</button><button className="secondary-action" onClick={handleRunRules}>Kör aktiva regler</button></div>
@@ -2759,6 +2764,7 @@ function App() {
               </div>
               <div className="view-switcher"><span className="badge">FTS5 + regler</span>{(['list','grid','table'] as DocumentViewMode[]).map(mode=><button aria-pressed={documentViewMode===mode} className={documentViewMode===mode?'active':''} key={mode} onClick={()=>setDocumentViewMode(mode)} type="button">{mode==='list'?'Lista':mode==='grid'?'Rutnät':'Tabell'}</button>)}</div>
             </div>
+            <div className="batch-toolbar"><button className={batchMode?'secondary-action active':'secondary-action'} onClick={()=>{setBatchMode(value=>!value);setSelectedDocumentIds([])}} type="button">{batchMode?'Avsluta batchläge':'Batchåtgärder'}</button>{batchMode?<><button className="mini-action" onClick={()=>setSelectedDocumentIds(renderedResults.map(result=>result.document.id))} type="button">Välj visade</button><span>{selectedDocumentIds.length} valda</span><select value={batchDraft.action} onChange={event=>setBatchDraft({...batchDraft,action:event.target.value})}><option value="add_tag">Lägg till tagg</option><option value="set_document_type">Sätt dokumenttyp</option><option value="archive">Flytta till arkiv</option><option value="review">Flytta till granskning</option></select>{['add_tag','set_document_type'].includes(batchDraft.action)?<input aria-label="Batchvärde" placeholder={batchDraft.action==='add_tag'?'Tagg':'Dokumenttyp'} value={batchDraft.value} onChange={event=>setBatchDraft({...batchDraft,value:event.target.value})}/>:null}<button className="primary-action" disabled={!selectedDocumentIds.length||(['add_tag','set_document_type'].includes(batchDraft.action)&&!batchDraft.value.trim())} onClick={handleApplyBatch} type="button">Kör på valda</button></>:null}</div>
 
             <div className="table-head">
               <span>Dokument</span>
@@ -2776,13 +2782,14 @@ function App() {
                 const index=resultWindowStart+localIndex
                 return (
                 <button
-                  className={index === selectedIndex ? 'document-row selected' : 'document-row'}
+                  aria-pressed={batchMode?selectedDocumentIds.includes(result.document.id):undefined}
+                  className={`${index === selectedIndex ? 'document-row selected' : 'document-row'}${selectedDocumentIds.includes(result.document.id)?' batch-selected':''}`}
                   key={result.document.id}
-                  onClick={() => setSelectedIndex(index)}
+                  onClick={() => batchMode?setSelectedDocumentIds(ids=>ids.includes(result.document.id)?ids.filter(id=>id!==result.document.id):[...ids,result.document.id]):setSelectedIndex(index)}
                   type="button"
                 >
                   <span>
-                    <strong>{result.document.title}</strong>
+                    <strong>{batchMode?(selectedDocumentIds.includes(result.document.id)?'☑ ':'☐ '):''}{result.document.title}</strong>
                     <small>{result.document.source_label}</small>
                   </span>
                   <span>{result.document.document_type}</span>

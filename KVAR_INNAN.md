@@ -32,10 +32,10 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 
 ## 4. Analys, regler och bakgrundsjobb
 - [x] ✅ Jobb-tabell med status (schema v9)
-- [ ] ❌ Enhetlig beständig jobbmodell för alla tunga operationer
-- [ ] ❌ Incrementell aktualitet (dependency tracking, dirty flags)
-- [ ] ❌ Regelbyggare UI (flera villkor, AND/OR/NOT, testkörning)
-- [ ] ❌ Batchåtgärder
+- [ ] 🔶 Enhetlig beständig jobbmodell med payload, checkpoints, beroenden, paus, avbrott och retry-policy
+- [ ] 🔶 Incrementell aktualitet med beständiga dirty flags och orsak
+- [ ] 🔷 Regelbyggare UI med AND/OR/NOT, flera villkor, versionshantering, matchförklaringar och test/förslagsläge
+- [ ] 🔷 Batchåtgärder för upp till 10 000 valda dokument: tagg, typ, arkiv och granskning
 
 ## 5. Import, export och portabilitet
 - [x] ✅ .vaultarchive-format (schema v20)

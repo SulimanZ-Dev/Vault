@@ -1016,6 +1016,7 @@ fn initialize_vault(app: tauri::AppHandle) -> Result<VaultInitStatus, String> {
 
 fn initialize_vault_at(data_root: &Path) -> rusqlite::Result<VaultInitStatus> {
     create_vault_directories(data_root).map_err(to_sql_error)?;
+    cleanup_controlled_temporary_files(data_root).map_err(to_sql_error)?;
 
     let database_path = data_root.join("vault.db");
     let testlab_database_path = data_root.join("testlab").join("vault-test.db");
@@ -1047,6 +1048,45 @@ fn initialize_vault_at(data_root: &Path) -> rusqlite::Result<VaultInitStatus> {
         testlab_isolated: data_root.join("testlab").exists(),
         testlab_document_count,
     })
+}
+
+fn cleanup_controlled_temporary_files(data_root: &Path) -> std::io::Result<()> {
+    for name in ["temp", "portable-import"] {
+        let directory = data_root.join(name);
+        if directory.exists() {
+            fs::remove_dir_all(&directory)?;
+        }
+        fs::create_dir_all(&directory)?;
+    }
+    let index = data_root.join("index");
+    if index.is_dir() {
+        for entry in fs::read_dir(&index)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir()
+                && entry.file_name().to_string_lossy().starts_with("zip-import-")
+            {
+                fs::remove_dir_all(entry.path())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_zip_entry_size(
+    uncompressed_size: u64,
+    compressed_size: u64,
+    maximum_entry_size: u64,
+) -> Result<(), String> {
+    if uncompressed_size > maximum_entry_size {
+        return Err("Arkivposten överskrider säker storleksgräns".into());
+    }
+    if uncompressed_size > 10 * 1024 * 1024
+        && compressed_size > 0
+        && uncompressed_size / compressed_size > 1_000
+    {
+        return Err("Arkivposten har en osäker kompressionsgrad".into());
+    }
+    Ok(())
 }
 
 fn initialize_database(
@@ -5464,6 +5504,11 @@ fn restore_password_backup(
             let mut entry = archive
                 .by_index_decrypt(index, password.as_bytes())
                 .map_err(|_| "Fel lösenord eller skadad skyddad backup".to_string())?;
+            validate_zip_entry_size(
+                entry.size(),
+                entry.compressed_size(),
+                100 * 1024 * 1024 * 1024,
+            )?;
             total = total.saturating_add(entry.size());
             if total > 100 * 1024 * 1024 * 1024 {
                 return Err("Backupen är större än säkerhetsgränsen 100 GB".into());
@@ -5837,6 +5882,9 @@ fn restore_portable_archive_at(
     }
     let file = fs::File::open(archive_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    if archive.len() > 100_000 {
+        return Err("Arkivet innehåller orimligt många poster".into());
+    }
     if archive.by_name("portable-format.json").is_err() || archive.by_name("vault.db").is_err() {
         return Err("Arkivet saknar Vault-manifest eller databas".into());
     }
@@ -5846,6 +5894,11 @@ fn restore_portable_archive_at(
     fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+        validate_zip_entry_size(
+            entry.size(),
+            entry.compressed_size(),
+            100 * 1024 * 1024 * 1024,
+        )?;
         let enclosed = entry
             .enclosed_name()
             .ok_or_else(|| "Osäker sökväg i arkivet".to_string())?
@@ -9120,7 +9173,7 @@ fn import_text_document(
         title.trim()
     });
     let temp_path = data_root
-        .join("index")
+        .join("temp")
         .join(format!("text-import-{}-{safe_title}.txt", epoch_seconds()));
     fs::write(&temp_path, text.as_bytes()).map_err(|error| error.to_string())?;
     let imported = import_document_at(&data_root, &temp_path).map_err(|error| error.to_string());
@@ -9403,6 +9456,15 @@ fn import_archive_at(
             .is_some_and(|mode| mode & 0o170000 == 0o120000)
         {
             continue;
+        }
+        if let Err(message) =
+            validate_zip_entry_size(entry.size(), entry.compressed_size(), 100 * 1024 * 1024)
+        {
+            let _ = fs::remove_dir_all(&temp_root);
+            return Err(to_sql_error(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message,
+            )));
         }
         total_size = total_size.saturating_add(entry.size());
         if entry.size() > 100 * 1024 * 1024 || total_size > 1024 * 1024 * 1024 {
@@ -12662,6 +12724,30 @@ fn validates_calendar_dates_strictly() {
     assert!(is_valid_iso_date("2026-07-21"));
     assert!(!is_valid_iso_date("21/07/2026"));
     assert!(!is_valid_iso_date("2026-7-21"));
+}
+
+#[test]
+fn cleans_only_controlled_temporary_files_and_rejects_zip_bombs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let controlled = temp.path().join("temp").join("crash-remnant");
+    let portable = temp.path().join("portable-import").join("staged");
+    let old_import = temp.path().join("index").join("zip-import-old");
+    let permanent = temp.path().join("index").join("search-cache");
+    fs::create_dir_all(&controlled).expect("controlled");
+    fs::create_dir_all(&portable).expect("portable");
+    fs::create_dir_all(&old_import).expect("old import");
+    fs::create_dir_all(&permanent).expect("permanent");
+    fs::write(controlled.join("secret.tmp"), b"temporary").expect("write");
+
+    cleanup_controlled_temporary_files(temp.path()).expect("cleanup");
+    assert!(temp.path().join("temp").is_dir());
+    assert!(!controlled.exists());
+    assert!(!portable.exists());
+    assert!(!old_import.exists());
+    assert!(permanent.exists());
+    assert!(validate_zip_entry_size(11 * 1024 * 1024, 1, 100 * 1024 * 1024).is_err());
+    assert!(validate_zip_entry_size(1024, 512, 100 * 1024 * 1024).is_ok());
+    assert!(validate_zip_entry_size(101 * 1024 * 1024, 50 * 1024 * 1024, 100 * 1024 * 1024).is_err());
 }
 
 #[test]

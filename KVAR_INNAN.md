@@ -53,13 +53,13 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 - [ ] ❌ Backup till extern disk/nätverksmapp
 - [ ] ❌ Säkert upplåsningsflöde (Credential Manager/DPAPI)
 - [ ] ❌ Restore-guide (välj backup → verifiera → lösenord → innehåll → restore)
-- [ ] ❌ Temporära filer (kontrollerad katalog, rensning efter krasch)
+- [ ] 🔷 Temporära filer (kontrollerad katalog, städning vid start/efter operation och ZIP-import flyttad ur permanent index)
 
 ## 7. Säkerhet och hårdning
 - [x] ✅ PIN-läge, sessionslåsning, dokumentlås
 - [x] ✅ Krypterad privat sektion (schema v21)
 - [x] ✅ Gästläge
-- [ ] ❌ Hotmodell och tester för filattacker (path traversal, ZIP-bomber, etc.)
+- [ ] 🔷 Hotmodell och automatiska tester för traversal, ZIP-bomber, kompressionsgrad, symlänkar och storleksgränser
 - [ ] ❌ Nyckelhantering (Credential Manager, DPAPI)
 - [ ] ❌ Loggaudit (inga känsliga data i loggar)
 - [ ] ❌ Plugin- och exporträttigheter (behörighetsmatris)

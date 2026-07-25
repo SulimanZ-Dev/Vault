@@ -42,6 +42,7 @@ const ORGANIZER_LOCKS_MIGRATION: &str = include_str!("../migrations/0024_organiz
 const VIEWER_VERSIONS_MIGRATION: &str = include_str!("../migrations/0025_viewer_versions.sql");
 const BACKUP_DESTINATIONS_MIGRATION: &str =
     include_str!("../migrations/0026_backup_destinations.sql");
+const DOMAIN_MODELS_MIGRATION: &str = include_str!("../migrations/0027_domain_models.sql");
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (1, "initial local vault schema", INITIAL_MIGRATION),
     (
@@ -120,6 +121,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         26,
         "backup destinations and safe unlock",
         BACKUP_DESTINATIONS_MIGRATION,
+    ),
+    (
+        27,
+        "deep domain models for identity vehicles employment warranties",
+        DOMAIN_MODELS_MIGRATION,
     ),
 ];
 
@@ -11004,7 +11010,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let status = initialize_vault_at(temp_dir.path()).expect("vault initialization");
 
-        assert_eq!(status.schema_version, 26);
+        assert_eq!(status.schema_version, 27);
         assert_eq!(status.testlab_document_count, 4);
         assert!(status.production_vault_ready);
         assert!(PathBuf::from(status.database_path).exists());

@@ -807,3 +807,14 @@ cargo test
 - Flera namngivna layouter kan sparas, växlas och tas bort lokalt. Exportformatet v2 inkluderar widgetordning, storlekar och layoutnamn.
 - Verifierat med lint, språkguard, TypeScript/Vite-build, 26/26 Rusttester, releasebygge och NSIS-installer.
 - Verifierat i release-EXE:n: dashboardens **Anpassa** visar layoutnamn, sparning, widgetväljare och storlekskontroller; Ctrl+K öppnar kommandopaletten och **Kortkommandon** visar redigeringsfält för varje kommando.
+- Slutblocket utökade Test Lab till 57 syntetiska grundfall och lade till
+  avancerade dokumentlayouter samt ett komplett lokalt temaredigeringsflöde.
+- Djupa domänregister fylls nu från källbundna domänposter: identitet,
+  fordon/service, anställningar, avtalad lönehistorik, tilläggsavtal,
+  separata löneperioder och garantier.
+- Schema v32 lade till lokala notiser, löneperioder och beständiga körbara
+  adapterartefakter. Ett faktiskt release-EXE-prov hittade och rättade en
+  felaktig jobbkolumn i notisflödet; regressionstest lades till.
+- Slutkontroller: 35 Rust-tester, 22 UI-/tillgänglighetskontroller,
+  språkguard, lint, TypeScript/Vite-produktionsbygge och faktisk Tauri
+  release-EXE/NSIS.

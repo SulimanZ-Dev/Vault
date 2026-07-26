@@ -4409,6 +4409,14 @@ fn validate_plugin_manifest(manifest: &PluginManifest) -> Result<(), String> {
         {
             return Err("Åtgärden add_tag kräver write_tags".into());
         }
+        if action.action_type == "emit_adapter_artifact"
+            && !manifest
+                .capabilities
+                .iter()
+                .any(|x| x == "write_adapter_artifacts")
+        {
+            return Err("Åtgärden emit_adapter_artifact kräver write_adapter_artifacts".into());
+        }
         if action.action_type == "set_document_type"
             && !manifest
                 .capabilities
@@ -4445,7 +4453,8 @@ fn read_plugin_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginSummar
 
 fn refresh_local_notifications(connection: &Connection) -> rusqlite::Result<()> {
     let review_count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM documents WHERE vault_id=1 AND trashed_at IS NULL AND review_status IN ('needs_review','blocked')",
+        "SELECT COUNT(*) FROM claims c JOIN documents d ON d.id=c.document_id
+         WHERE c.vault_id=1 AND d.trashed_at IS NULL AND c.status='auto_extracted_pending_review'",
         [],
         |row| row.get(0),
     )?;
@@ -4477,7 +4486,7 @@ fn refresh_local_notifications(connection: &Connection) -> rusqlite::Result<()> 
         [],
     )?;
     let failed_jobs: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM jobs WHERE state='failed'",
+        "SELECT COUNT(*) FROM jobs WHERE status='failed'",
         [],
         |row| row.get(0),
     )?;
@@ -14303,6 +14312,15 @@ mod tests {
             })
             .expect("employment count");
         assert_eq!(employment_count, 1);
+        refresh_local_notifications(&connection).expect("local notifications");
+        let notification_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM local_notifications WHERE dismissed_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("notification count");
+        assert!(notification_count >= 1);
     }
 
     #[test]

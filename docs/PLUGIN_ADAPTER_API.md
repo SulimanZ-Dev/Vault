@@ -15,9 +15,9 @@ verification. Unsigned local manifests remain allowed but are clearly marked
 
 Supported `adapter_kind` values are `ocr_engine`, `importer`,
 `metadata_extractor`, `search_parser`, `exporter`, `dashboard_widget`, and
-`domain_model`. API 1.0 executes the safe `metadata_extractor` action contract;
-other kinds are versioned declarations for compatible adapters and never gain
-implicit file, process, or network access.
+`domain_model`. Every kind can execute the safe artifact contract below. The
+artifact is persisted by Vault as versioned local JSON configuration/output for
+the adapter host; it never gains implicit file, process, or network access.
 
 Required fields:
 
@@ -27,11 +27,18 @@ Required fields:
 - declared `capabilities` and `data_access`
 - `resource_limit` between 100 and 100000
 
-Executable 1.0 actions are `add_tag` and `set_document_type`. They require
+Executable 1.0 actions are `add_tag`, `set_document_type`, and
+`emit_adapter_artifact`. The first two require
 `write_tags` and `write_document_type` respectively. `match_text` is evaluated
 against the title unless `read_text` was approved. Locked and private documents
 are always excluded. Failures are isolated to the plugin run and logged without
 document content.
+
+`emit_adapter_artifact` uses `match_text` as a stable artifact key and accepts
+either JSON or a string in `value`. It requires `write_adapter_artifacts`.
+This is the executable boundary for OCR/import profiles, search-parser rules,
+export presets, dashboard metrics, and domain-model definitions. Artifacts are
+upserted per plugin, adapter kind, and key so reruns are deterministic.
 
 External sources use a separate local handoff adapter. Google Drive, OneDrive,
 Gmail, and Outlook are disabled by default. The user selects an existing export

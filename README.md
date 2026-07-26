@@ -1,44 +1,73 @@
 # Vault
 
-Vault 1.0.0 byggs som en Tauri-baserad Windows EXE. Vite/webbläsarläget ar bara en utvecklingspreview, inte slutprodukten.
+Vault 1.1.0 är ett lokalt, privat och helt AI-fritt dokumentarkiv för Windows.
+Appen är byggd med Tauri, React, Rust, SQLite och FTS5 och fungerar utan konto,
+molntjänst eller telemetri.
 
-Vault är ett lokalt, privat och helt AI-fritt dokumentarkiv för personligt bruk.
+[Hämta senaste Windows-installationen](https://github.com/SulimanZ-Dev/Vault/releases/latest)
 
-Målet är ett professionellt dokumenthanteringssystem som kan importera, organisera,
-söka, indexera och strukturera dokument utan molnkrav, telemetri, språkmodeller,
-embeddings, AI-klassificering eller externa dokumenttjänster.
+## Funktioner
 
-Projektet byggs iterativt. Innan applikationskod skrivs finns den första
-arkitektur- och produktleveransen i `docs/`.
+- Import av filer, mappar, ZIP, EML, urklipp och lokalt sparade webbsidor.
+- Svensk OCR med Tesseract samt PDF-text och OCR-fallback med Poppler.
+- Lokal textutvinning ur PDF, DOCX, XLSX och PPTX.
+- Intern PDF-visare med sidnavigation, zoom, rotation, miniatyrer, textlager,
+  markeringar, versioner och dokumentjämförelse.
+- Snabb lokal fulltextsökning med svenska regler, filter, operatorer, synonymer,
+  sökhistorik och sparade sökningar.
+- Claims, källor, granskningskö, relationer, graf, tidslinje, kalender,
+  konflikter och låsta manuella beslut.
+- Strukturerade lokala modeller för pass och identitet, fordon och service,
+  anställningar, lönehistorik, löneperioder, tilläggsavtal och garantier.
+- Regler med AND/OR/NOT, dokumentmallar, egna fält och batchåtgärder.
+- Mappar, kategorier, samlingar, favoriter och länkade anteckningar.
+- Lista, rutnät, tabell, galleri, kanban och delad dokumentvy.
+- Fullständigt anpassningsbara lokala teman och layouter.
+- Lokala notiser för granskning, utgående giltighet och misslyckade jobb.
+- Full, inkrementell, schemalagd och AES-256-krypterad backup.
+- Export till JSON, CSV, `.vaultzip` och `.vaultarchive`.
+- PIN/lösenord, sessionslås, dokumentlås, gästläge, DPAPI-snabbupplåsning och
+  krypterad privat sektion.
+- SHA-256-integritetskontroll och detektering av exakta och nära dubbletter.
+- Deklarativt lokalt plugin-API med sju adaptertyper och utan nätverks-,
+  process- eller AI-behörighet.
+- Isolerat Test Lab med 57 syntetiska grundfall och skaltest upp till
+  50 000 dokument.
 
-## Innehåll i 1.0.0
+## Integritet och avgränsningar
 
-- Windows EXE och NSIS-installer.
-- Lokal SQLite-databas med migreringar.
-- Lokal filimport med SHA-256, dubblettdetektion och content-addressed storage.
-- FTS5-sök, svensk regelbaserad query expansion och förklarad rankning.
-- Deterministisk dokumentklassificering och datumutvinning.
-- Taggar, kodord, claims och manuell claim-granskning.
-- Metadataredigering for produktionsdokument.
-- Lokal backup, validering, restore och pre-restore-sakerhetskopia.
-- Audit-logg, hälsokontroll, sökindexreparation och inbyggt Test Center.
-- Developer Test Lab i separat databas med syntetiska dokument.
+Vault lagrar dokument, metadata, OCR-text, databas, index och historik lokalt.
+Programmet använder inga språkmodeller, embeddings eller externa
+dokumenttjänster.
 
-## Första leveransen
+Följande ingår avsiktligt inte:
 
-- `docs/00-product-definition.md` - AI-fri produktdefinition, flöden och principer.
-- `docs/01-technical-architecture.md` - rekommenderad stack, alternativ och systemarkitektur.
-- `docs/02-data-model.md` - databastabeller, relationer, claims, källor, aktualitet och konflikter.
-- `docs/03-search-ocr-rules.md` - lokal OCR, fulltextsökning, svensk sökning, rankning och regelmotor.
-- `docs/04-security-storage-plugins.md` - lokal filförvaring, säkerhetsmodell, backup och pluginarkitektur.
-- `docs/05-design-system.md` - informationsarkitektur, navigering, design tokens och mockupbeskrivningar.
-- `docs/06-test-lab-and-acceptance.md` - Developer Test Lab och acceptanstester.
-- `docs/07-roadmap.md` - små milstolpar, första fungerande version, risker och uppskjutna funktioner.
-- `docs/08-pre-implementation-checklist.md` - spårning av alla 47 punkter som ska levereras före implementation.
-- `docs/09-dev-environment.md` - installerade utvecklingsverktyg och kvarvarande OCR-punkt.
-- `docs/10-implementation-log.md` - genomförda implementationsteg och verifiering.
+- synkning mellan datorer eller enheter,
+- OAuth-integrationer för Drive, OneDrive, Gmail eller Outlook,
+- kameraimport eller komplett styrning av fysisk skanner,
+- mobil companion,
+- Windows Hello.
 
-## Kör appen lokalt som desktop-app
+## Installera
+
+Öppna [GitHub Releases](https://github.com/SulimanZ-Dev/Vault/releases/latest)
+och hämta `Vault_1.1.0_x64-setup.exe`. Installern innehåller den färdiga
+Windows-appen.
+
+Den fristående `vault.exe` publiceras också för den som inte vill använda
+installern.
+
+## Utveckling
+
+Krav:
+
+- Node.js och npm
+- aktuell stabil Rust toolchain
+- Tauri-förutsättningar för Windows
+- Tesseract med svensk språkdata
+- Poppler
+
+Starta utvecklingsversionen:
 
 ```powershell
 cd app
@@ -46,21 +75,48 @@ npm install
 npm run tauri:dev
 ```
 
-Skapa Windows `.exe`/installer:
+Kör kontroller:
 
 ```powershell
 cd app
-npm run exe:build
+npm run lint
+npm run test:ui
+npm run build
+
+cd src-tauri
+cargo test
 ```
 
-`npm run dev` används bara som snabb UI-preview under utveckling. Vaults slutprodukt ska vara en Tauri-baserad Windows `.exe`, inte en webbläsarapp.
+Bygg optimerad EXE och NSIS-installer:
 
-## Absoluta principer
+```powershell
+cd app
+npm run tauri build
+```
 
-- Local-first och offline som standard.
-- Ingen AI-funktionalitet, inga AI-beroenden och ingen AI-förberedande kärnarkitektur.
-- Alla automatiska beslut ska vara deterministiska, testbara och förklarbara.
-- Originaldokument, databas, metadata, index, OCR-text och verifieringshistorik lagras lokalt.
-- Historik skrivs inte över av nya dokument.
-- Osäkerhet visas som osäkerhet eller konflikt, inte som gissning.
-- Manuellt låsta användarbeslut går före automatiska regler.
+## Dokumentation
+
+- [Full kravstatus](KVAR_INNAN.md)
+- [Produktdefinition](docs/00-product-definition.md)
+- [Teknisk arkitektur](docs/01-technical-architecture.md)
+- [Datamodell](docs/02-data-model.md)
+- [Sökning, OCR och regler](docs/03-search-ocr-rules.md)
+- [Säkerhet, lagring och plugins](docs/04-security-storage-plugins.md)
+- [Test Lab och acceptanstester](docs/06-test-lab-and-acceptance.md)
+- [Portabla format](docs/PORTABLE_FORMATS.md)
+- [Plugin Adapter API](docs/PLUGIN_ADAPTER_API.md)
+- [Implementationslogg](docs/10-implementation-log.md)
+
+## Verifierad release
+
+Version 1.1.0 är verifierad med:
+
+- 35 Rust-tester,
+- 22 UI- och tillgänglighetskontroller,
+- TypeScript/Vite-produktionsbygge,
+- faktisk start och funktionsprov i paketerad `vault.exe`,
+- Test Center i release-EXE: 19 godkända och 0 misslyckade.
+
+## Licens
+
+[MIT](LICENSE)

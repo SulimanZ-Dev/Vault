@@ -1,0 +1,19 @@
+{
+  "id": "se.vault.local-contract-tags",
+  "name": "Lokala avtalsetiketter",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "adapter_kind": "metadata_extractor",
+  "description": "Etiketterar dokument som innehåller ordet avtal.",
+  "ai_free": true,
+  "resource_limit": 10000,
+  "capabilities": ["read_metadata", "read_text", "write_tags"],
+  "data_access": ["metadata", "document_text"],
+  "actions": [
+    {
+      "action_type": "add_tag",
+      "match_text": "avtal",
+      "value": "Avtal"
+    }
+  ]
+}

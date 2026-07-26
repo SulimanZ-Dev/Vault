@@ -62,7 +62,7 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 - [ ] 🔷 Hotmodell och automatiska tester för traversal, ZIP-bomber, kompressionsgrad, symlänkar och storleksgränser
 - [ ] ❌ Nyckelhantering (Credential Manager, DPAPI)
 - [ ] ❌ Loggaudit (inga känsliga data i loggar)
-- [ ] ❌ Plugin- och exporträttigheter (behörighetsmatris)
+- [ ] 🔷 Plugin- och exporträttigheter (backendvalidering och synlig pluginmatris klara; separat exportpolicy återstår)
 
 ## 8. Prestanda och skalverifiering
 - [x] ✅ Testgenerator (100, 1 000, 10 000, 50 000 dokument)
@@ -73,9 +73,9 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 
 ## 9. Plugins och externa importörer
 - [x] ✅ Deklarativt sandboxat pluginsystem (schema v22)
-- [ ] ❌ Versionerade adapter-API:er
-- [ ] ❌ Externa importörer (Google Drive, OneDrive, Gmail, Outlook)
-- [ ] ❌ Plugin-tillit (signering, checksummor, användargodkännande)
+- [ ] 🔷 Versionerade adapter-API:er (API 1.0, kompatibilitet, typer, resursgräns och dokumentation klara; fler körbara adapterkontrakt återstår)
+- [x] ✅ Externa importörer (Google Drive, OneDrive, Gmail, Outlook via frivillig lokal export-/synkmapp med preview, exakt urval och bekräftelse)
+- [ ] 🔷 Plugin-tillit (SHA-256, manipulationsavstängning och användargodkännande klara; kryptografisk utgivarsignering återstår)
 
 ## 10. Test Lab och slutacceptans
 - [x] ✅ Isolerad Test Lab-databas

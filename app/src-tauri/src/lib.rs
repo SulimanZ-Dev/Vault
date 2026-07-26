@@ -47,6 +47,8 @@ const DOMAIN_MODELS_MIGRATION: &str = include_str!("../migrations/0027_domain_mo
 const VIEWER_COORDINATES_MIGRATION: &str =
     include_str!("../migrations/0028_viewer_coordinates.sql");
 const JOBS_RULES_BATCH_MIGRATION: &str = include_str!("../migrations/0029_jobs_rules_batch.sql");
+const PLUGIN_ADAPTERS_IMPORTERS_MIGRATION: &str =
+    include_str!("../migrations/0030_plugin_adapters_importers.sql");
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (1, "initial local vault schema", INITIAL_MIGRATION),
     (
@@ -140,6 +142,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         29,
         "unified jobs compound rules and batch actions",
         JOBS_RULES_BATCH_MIGRATION,
+    ),
+    (
+        30,
+        "versioned plugin adapters and external import sources",
+        PLUGIN_ADAPTERS_IMPORTERS_MIGRATION,
     ),
 ];
 
@@ -821,6 +828,22 @@ struct PluginManifest {
     actions: Vec<PluginAction>,
     #[serde(default)]
     ai_free: bool,
+    #[serde(default = "default_plugin_api_version")]
+    api_version: String,
+    #[serde(default = "default_plugin_adapter_kind")]
+    adapter_kind: String,
+    #[serde(default = "default_plugin_resource_limit")]
+    resource_limit: i64,
+}
+
+fn default_plugin_api_version() -> String {
+    "1.0".into()
+}
+fn default_plugin_adapter_kind() -> String {
+    "metadata_extractor".into()
+}
+fn default_plugin_resource_limit() -> i64 {
+    10_000
 }
 
 #[derive(Deserialize)]
@@ -842,6 +865,38 @@ struct PluginSummary {
     approved: bool,
     last_run_at: Option<String>,
     last_result: Option<String>,
+    api_version: String,
+    adapter_kind: String,
+    manifest_sha256: String,
+    signature_status: String,
+    resource_limit: i64,
+}
+
+#[derive(Serialize)]
+struct ExternalImportSource {
+    provider: String,
+    display_name: String,
+    enabled: bool,
+    approved: bool,
+    local_staging_path: Option<String>,
+    last_preview_at: Option<String>,
+    last_import_at: Option<String>,
+    last_result: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ExternalImportFile {
+    path: String,
+    relative_path: String,
+    size_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct ExternalImportPreview {
+    provider: String,
+    files: Vec<ExternalImportFile>,
+    skipped_count: i64,
+    total_size_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -1072,7 +1127,10 @@ fn cleanup_controlled_temporary_files(data_root: &Path) -> std::io::Result<()> {
         for entry in fs::read_dir(&index)? {
             let entry = entry?;
             if entry.file_type()?.is_dir()
-                && entry.file_name().to_string_lossy().starts_with("zip-import-")
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("zip-import-")
             {
                 fs::remove_dir_all(entry.path())?;
             }
@@ -3413,6 +3471,27 @@ fn validate_plugin_manifest(manifest: &PluginManifest) -> Result<(), String> {
     if !manifest.ai_free {
         return Err("Plugin-manifestet måste uttryckligen ange ai_free: true".into());
     }
+    if manifest.api_version != "1.0" {
+        return Err(format!(
+            "Plugin API {} stöds inte. Den här Vault-versionen stöder API 1.0",
+            manifest.api_version
+        ));
+    }
+    let adapter_kinds = [
+        "ocr_engine",
+        "importer",
+        "metadata_extractor",
+        "search_parser",
+        "exporter",
+        "dashboard_widget",
+        "domain_model",
+    ];
+    if !adapter_kinds.contains(&manifest.adapter_kind.as_str()) {
+        return Err(format!("Okänd adaptertyp: {}", manifest.adapter_kind));
+    }
+    if !(100..=100_000).contains(&manifest.resource_limit) {
+        return Err("Pluginens resource_limit måste vara 100–100000".into());
+    }
     let allowed = [
         "read_metadata",
         "read_text",
@@ -3474,13 +3553,18 @@ fn read_plugin_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginSummar
         approved: row.get::<_, i64>(7)? != 0,
         last_run_at: row.get(8)?,
         last_result: row.get(9)?,
+        api_version: row.get(10)?,
+        adapter_kind: row.get(11)?,
+        manifest_sha256: row.get(12)?,
+        signature_status: row.get(13)?,
+        resource_limit: row.get(14)?,
     })
 }
 
 #[tauri::command]
 fn list_plugins(app: tauri::AppHandle) -> Result<Vec<PluginSummary>, String> {
     let connection = production_connection(&app)?;
-    let mut statement=connection.prepare("SELECT id,name,version,description,capabilities_json,data_access_json,enabled,approved,last_run_at,last_result FROM plugins ORDER BY name COLLATE NOCASE").map_err(|e|e.to_string())?;
+    let mut statement=connection.prepare("SELECT id,name,version,description,capabilities_json,data_access_json,enabled,approved,last_run_at,last_result,api_version,adapter_kind,manifest_sha256,signature_status,resource_limit FROM plugins ORDER BY name COLLATE NOCASE").map_err(|e|e.to_string())?;
     let rows = statement
         .query_map([], read_plugin_summary)
         .map_err(|e| e.to_string())?
@@ -3509,16 +3593,14 @@ fn install_plugin(
     let dir = data_root.join("plugins").join(&manifest.id);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let target = dir.join("manifest.json");
-    fs::write(
-        &target,
-        serde_json::to_vec_pretty(
-            &serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?,
+    let normalized = serde_json::to_vec_pretty(
+        &serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    fs::write(&target, &normalized).map_err(|e| e.to_string())?;
+    let manifest_sha256 = format!("{:x}", Sha256::digest(&normalized));
     let connection = Connection::open(data_root.join("vault.db")).map_err(|e| e.to_string())?;
-    connection.execute("INSERT INTO plugins(id,name,version,description,manifest_path,capabilities_json,data_access_json,enabled,approved) VALUES(?1,?2,?3,?4,?5,?6,?7,0,0) ON CONFLICT(id) DO UPDATE SET name=excluded.name,version=excluded.version,description=excluded.description,manifest_path=excluded.manifest_path,capabilities_json=excluded.capabilities_json,data_access_json=excluded.data_access_json,enabled=0,approved=0,updated_at=CURRENT_TIMESTAMP",params![manifest.id,manifest.name,manifest.version,manifest.description,target.to_string_lossy(),serde_json::to_string(&manifest.capabilities).unwrap_or("[]".into()),serde_json::to_string(&manifest.data_access).unwrap_or("[]".into())]).map_err(|e|e.to_string())?;
+    connection.execute("INSERT INTO plugins(id,name,version,description,manifest_path,capabilities_json,data_access_json,enabled,approved,api_version,adapter_kind,manifest_sha256,signature_status,resource_limit) VALUES(?1,?2,?3,?4,?5,?6,?7,0,0,?8,?9,?10,'local_checksum',?11) ON CONFLICT(id) DO UPDATE SET name=excluded.name,version=excluded.version,description=excluded.description,manifest_path=excluded.manifest_path,capabilities_json=excluded.capabilities_json,data_access_json=excluded.data_access_json,api_version=excluded.api_version,adapter_kind=excluded.adapter_kind,manifest_sha256=excluded.manifest_sha256,signature_status=excluded.signature_status,resource_limit=excluded.resource_limit,enabled=0,approved=0,updated_at=CURRENT_TIMESTAMP",params![manifest.id,manifest.name,manifest.version,manifest.description,target.to_string_lossy(),serde_json::to_string(&manifest.capabilities).unwrap_or("[]".into()),serde_json::to_string(&manifest.data_access).unwrap_or("[]".into()),manifest.api_version,manifest.adapter_kind,manifest_sha256,manifest.resource_limit]).map_err(|e|e.to_string())?;
     connection.execute("INSERT INTO plugin_events(plugin_id,event_type,safe_summary) VALUES(?1,'installed','Manifest validated; plugin remains disabled pending approval')",[&manifest.id]).map_err(|e|e.to_string())?;
     record_audit_event(
         &connection,
@@ -3577,19 +3659,29 @@ fn set_plugin_enabled(
 fn run_plugin(app: tauri::AppHandle, id: String) -> Result<PluginRunResult, String> {
     let data_root = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let connection = Connection::open(data_root.join("vault.db")).map_err(|e| e.to_string())?;
-    let (path, enabled, approved): (String, i64, i64) = connection
+    let (path, enabled, approved, expected_sha256, resource_limit): (String, i64, i64, String, i64) = connection
         .query_row(
-            "SELECT manifest_path,enabled,approved FROM plugins WHERE id=?1",
+            "SELECT manifest_path,enabled,approved,manifest_sha256,resource_limit FROM plugins WHERE id=?1",
             [&id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .map_err(|e| e.to_string())?;
     if enabled == 0 || approved == 0 {
         return Err("Plugin är inte frivilligt aktiverad och godkänd".into());
     }
+    let manifest_bytes = fs::read(path).map_err(|e| e.to_string())?;
+    let actual_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
+    if expected_sha256.is_empty() || actual_sha256 != expected_sha256 {
+        connection.execute(
+            "UPDATE plugins SET enabled=0,approved=0,last_result='Manifest checksum mismatch; disabled' WHERE id=?1",
+            [&id],
+        ).map_err(|e| e.to_string())?;
+        return Err(
+            "Plugin-manifestet har ändrats efter godkännandet. Pluginen har inaktiverats".into(),
+        );
+    }
     let manifest: PluginManifest =
-        serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        serde_json::from_slice(&manifest_bytes).map_err(|e| e.to_string())?;
     validate_plugin_manifest(&manifest)?;
     let mut statement=connection.prepare("SELECT id,title,extracted_text,document_type FROM documents WHERE vault_id=1 AND trashed_at IS NULL AND is_locked=0 AND is_private=0").map_err(|e|e.to_string())?;
     let docs = statement
@@ -3606,7 +3698,7 @@ fn run_plugin(app: tauri::AppHandle, id: String) -> Result<PluginRunResult, Stri
         .map_err(|e| e.to_string())?;
     drop(statement);
     let mut changed = 0;
-    for (document_id, title, text, current_type) in &docs {
+    for (document_id, title, text, current_type) in docs.iter().take(resource_limit as usize) {
         let haystack = if manifest.capabilities.iter().any(|x| x == "read_text") {
             format!("{title} {text}").to_lowercase()
         } else {
@@ -3692,6 +3784,192 @@ fn remove_plugin(app: tauri::AppHandle, id: String) -> Result<Vec<PluginSummary>
     .map_err(|e| e.to_string())?;
     drop(connection);
     list_plugins(app)
+}
+
+fn read_external_import_source(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExternalImportSource> {
+    Ok(ExternalImportSource {
+        provider: row.get(0)?,
+        display_name: row.get(1)?,
+        enabled: row.get::<_, i64>(2)? != 0,
+        approved: row.get::<_, i64>(3)? != 0,
+        local_staging_path: row.get(4)?,
+        last_preview_at: row.get(5)?,
+        last_import_at: row.get(6)?,
+        last_result: row.get(7)?,
+    })
+}
+
+fn valid_external_provider(provider: &str) -> bool {
+    matches!(provider, "google_drive" | "onedrive" | "gmail" | "outlook")
+}
+
+#[tauri::command]
+fn list_external_import_sources(
+    app: tauri::AppHandle,
+) -> Result<Vec<ExternalImportSource>, String> {
+    let connection = production_connection(&app)?;
+    let mut statement = connection.prepare("SELECT provider,display_name,enabled,approved,local_staging_path,last_preview_at,last_import_at,last_result FROM external_import_sources ORDER BY display_name").map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([], read_external_import_source)
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+fn configure_external_import_source(
+    app: tauri::AppHandle,
+    provider: String,
+    local_staging_path: String,
+    enabled: bool,
+) -> Result<Vec<ExternalImportSource>, String> {
+    if !valid_external_provider(&provider) {
+        return Err("Okänd extern importkälla".into());
+    }
+    let root = fs::canonicalize(Path::new(&local_staging_path))
+        .map_err(|_| "Den valda lokala mappen kan inte läsas".to_string())?;
+    if !root.is_dir() {
+        return Err("Importkällan måste vara en lokal mapp".into());
+    }
+    let connection = production_connection(&app)?;
+    connection.execute(
+        "UPDATE external_import_sources SET local_staging_path=?1,enabled=?2,approved=?2,updated_at=CURRENT_TIMESTAMP WHERE provider=?3",
+        params![root.to_string_lossy(), i64::from(enabled), provider],
+    ).map_err(|e| e.to_string())?;
+    record_audit_event(
+        &connection,
+        "external_import_configured",
+        "external_import",
+        None,
+        &format!("{provider} local handoff configured; enabled={enabled}"),
+    )
+    .map_err(|e| e.to_string())?;
+    drop(connection);
+    list_external_import_sources(app)
+}
+
+fn external_import_root(connection: &Connection, provider: &str) -> Result<PathBuf, String> {
+    if !valid_external_provider(provider) {
+        return Err("Okänd extern importkälla".into());
+    }
+    let (path, enabled, approved): (Option<String>, i64, i64) = connection.query_row(
+        "SELECT local_staging_path,enabled,approved FROM external_import_sources WHERE provider=?1",
+        [provider], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).map_err(|e| e.to_string())?;
+    if enabled == 0 || approved == 0 {
+        return Err("Importkällan måste uttryckligen aktiveras först".into());
+    }
+    fs::canonicalize(path.ok_or_else(|| "Ingen lokal mapp har valts".to_string())?)
+        .map_err(|_| "Importmappen finns inte längre".to_string())
+}
+
+#[tauri::command]
+fn preview_external_import(
+    app: tauri::AppHandle,
+    provider: String,
+) -> Result<ExternalImportPreview, String> {
+    let connection = production_connection(&app)?;
+    let root = external_import_root(&connection, &provider)?;
+    let all = collect_supported_import_files(&root).map_err(|e| e.to_string())?;
+    let skipped_count = all.len().saturating_sub(1000) as i64;
+    let mut files = Vec::new();
+    let mut total_size_bytes = 0_u64;
+    for path in all.into_iter().take(1000) {
+        let canonical = fs::canonicalize(&path).map_err(|e| e.to_string())?;
+        if !canonical.starts_with(&root) {
+            continue;
+        }
+        let size_bytes = canonical.metadata().map_err(|e| e.to_string())?.len();
+        total_size_bytes = total_size_bytes.saturating_add(size_bytes);
+        files.push(ExternalImportFile {
+            relative_path: canonical
+                .strip_prefix(&root)
+                .unwrap_or(&canonical)
+                .to_string_lossy()
+                .to_string(),
+            path: canonical.to_string_lossy().to_string(),
+            size_bytes,
+        });
+    }
+    connection.execute(
+        "UPDATE external_import_sources SET last_preview_at=CURRENT_TIMESTAMP,last_result=?1 WHERE provider=?2",
+        params![format!("{} files previewed", files.len()), provider],
+    ).map_err(|e| e.to_string())?;
+    Ok(ExternalImportPreview {
+        provider,
+        files,
+        skipped_count,
+        total_size_bytes,
+    })
+}
+
+#[tauri::command]
+fn import_external_selection(
+    app: tauri::AppHandle,
+    provider: String,
+    paths: Vec<String>,
+) -> Result<DirectoryImportResult, String> {
+    if paths.is_empty() || paths.len() > 1000 {
+        return Err("Välj 1–1000 filer från förhandsgranskningen".into());
+    }
+    let data_root = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let connection = production_connection(&app)?;
+    let root = external_import_root(&connection, &provider)?;
+    let mut safe_paths = Vec::with_capacity(paths.len());
+    for raw in paths {
+        let canonical =
+            fs::canonicalize(raw).map_err(|_| "En vald fil finns inte längre".to_string())?;
+        if !canonical.is_file()
+            || !canonical.starts_with(&root)
+            || !is_supported_import_path(&canonical)
+        {
+            return Err("En vald fil ligger utanför den godkända mappen eller har ett format som inte stöds".into());
+        }
+        safe_paths.push(canonical);
+    }
+    drop(connection);
+    let mut result = DirectoryImportResult {
+        scanned_file_count: 0,
+        imported_count: 0,
+        duplicate_count: 0,
+        failed_count: 0,
+        results: Vec::new(),
+        failures: Vec::new(),
+    };
+    for path in safe_paths {
+        result.scanned_file_count += 1;
+        match import_document_at(&data_root, &path) {
+            Ok(imported) => {
+                if imported.duplicate {
+                    result.duplicate_count += 1;
+                }
+                result.imported_count += 1;
+                result.results.push(imported);
+            }
+            Err(error) => {
+                result.failed_count += 1;
+                result.failures.push(format!("{}: {error}", path.display()));
+            }
+        }
+    }
+    let connection = production_connection(&app)?;
+    connection.execute(
+        "UPDATE external_import_sources SET last_import_at=CURRENT_TIMESTAMP,last_result=?1 WHERE provider=?2",
+        params![format!("{} imported, {} duplicates, {} failed", result.imported_count, result.duplicate_count, result.failed_count), provider],
+    ).map_err(|e| e.to_string())?;
+    record_audit_event(
+        &connection,
+        "external_import_completed",
+        "external_import",
+        None,
+        &format!(
+            "{provider}: {} selected files imported",
+            result.imported_count
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(result)
 }
 
 fn mask_sensitive_text(text: &str) -> String {
@@ -5679,11 +5957,29 @@ fn create_portable_archive_at(data_root: &Path) -> Result<PortableArchiveResult,
 }
 
 const EXPORT_TABLES: &[&str] = &[
-    "documents", "files", "document_versions", "document_pages", "claims",
-    "source_spans", "entities", "document_entities", "relations", "tags",
-    "document_tags", "folders", "categories", "saved_searches", "automation_rules",
-    "theme_profiles", "code_words", "dashboard_layouts", "timeline_events",
-    "conflicts", "conflict_decisions", "verification_history", "audit_events",
+    "documents",
+    "files",
+    "document_versions",
+    "document_pages",
+    "claims",
+    "source_spans",
+    "entities",
+    "document_entities",
+    "relations",
+    "tags",
+    "document_tags",
+    "folders",
+    "categories",
+    "saved_searches",
+    "automation_rules",
+    "theme_profiles",
+    "code_words",
+    "dashboard_layouts",
+    "timeline_events",
+    "conflicts",
+    "conflict_decisions",
+    "verification_history",
+    "audit_events",
 ];
 
 fn sqlite_json(value: ValueRef<'_>) -> serde_json::Value {
@@ -5692,7 +5988,9 @@ fn sqlite_json(value: ValueRef<'_>) -> serde_json::Value {
         ValueRef::Integer(value) => value.into(),
         ValueRef::Real(value) => serde_json::json!(value),
         ValueRef::Text(value) => String::from_utf8_lossy(value).into_owned().into(),
-        ValueRef::Blob(value) => base64::engine::general_purpose::STANDARD.encode(value).into(),
+        ValueRef::Blob(value) => base64::engine::general_purpose::STANDARD
+            .encode(value)
+            .into(),
     }
 }
 
@@ -5748,7 +6046,11 @@ fn table_csv(rows: &[serde_json::Map<String, serde_json::Value>]) -> String {
     let columns = first.keys().cloned().collect::<Vec<_>>();
     let mut output = format!(
         "{}\r\n",
-        columns.iter().map(|value| csv_cell(&value.clone().into())).collect::<Vec<_>>().join(",")
+        columns
+            .iter()
+            .map(|value| csv_cell(&value.clone().into()))
+            .collect::<Vec<_>>()
+            .join(",")
     );
     for row in rows {
         output.push_str(
@@ -5766,9 +6068,19 @@ fn table_csv(rows: &[serde_json::Map<String, serde_json::Value>]) -> String {
 fn safe_export_name(value: &str) -> String {
     let cleaned = value
         .chars()
-        .map(|character| if character.is_alphanumeric() || matches!(character, '-' | '_' | '.') { character } else { '_' })
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
-    if cleaned.trim_matches('_').is_empty() { "dokument".into() } else { cleaned }
+    if cleaned.trim_matches('_').is_empty() {
+        "dokument".into()
+    } else {
+        cleaned
+    }
 }
 
 #[tauri::command]
@@ -5778,7 +6090,10 @@ fn create_data_export(
     include_originals: bool,
     folder_layout: String,
 ) -> Result<DataExportResult, String> {
-    let data_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
     initialize_vault_at(&data_root).map_err(|error| error.to_string())?;
     create_data_export_at(&data_root, &format, include_originals, &folder_layout)
 }
@@ -5795,13 +6110,17 @@ fn create_data_export_at(
     if !["flat", "vault", "type"].contains(&folder_layout) {
         return Err("Mappstruktur måste vara flat, vault eller type".into());
     }
-    let connection = Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
+    let connection =
+        Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
     let mut tables = serde_json::Map::new();
     let mut row_count = 0;
     for table in EXPORT_TABLES {
         let rows = export_table_rows(&connection, table)?;
         row_count += rows.len();
-        tables.insert((*table).into(), serde_json::Value::Array(rows.into_iter().map(serde_json::Value::Object).collect()));
+        tables.insert(
+            (*table).into(),
+            serde_json::Value::Array(rows.into_iter().map(serde_json::Value::Object).collect()),
+        );
     }
     let manifest = serde_json::json!({
         "format": "vault-data-export",
@@ -5818,59 +6137,122 @@ fn create_data_export_at(
     let stamp = epoch_seconds();
     if format == "json" {
         let path = export_root.join(format!("vault-data-{stamp}.json"));
-        fs::write(&path, serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
-        return Ok(DataExportResult { export_path: path.to_string_lossy().into_owned(), format: format.into(), table_count: EXPORT_TABLES.len(), row_count, file_count: 0, sha256: Some(sha256_file(&path).map_err(|error| error.to_string())?) });
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(DataExportResult {
+            export_path: path.to_string_lossy().into_owned(),
+            format: format.into(),
+            table_count: EXPORT_TABLES.len(),
+            row_count,
+            file_count: 0,
+            sha256: Some(sha256_file(&path).map_err(|error| error.to_string())?),
+        });
     }
     let directory = export_root.join(format!("vault-data-{stamp}"));
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     for table in EXPORT_TABLES {
-        let rows = manifest["tables"][*table].as_array().cloned().unwrap_or_default();
-        let objects = rows.into_iter().filter_map(|value| value.as_object().cloned()).collect::<Vec<_>>();
-        fs::write(directory.join(format!("{table}.csv")), table_csv(&objects)).map_err(|error| error.to_string())?;
+        let rows = manifest["tables"][*table]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let objects = rows
+            .into_iter()
+            .filter_map(|value| value.as_object().cloned())
+            .collect::<Vec<_>>();
+        fs::write(directory.join(format!("{table}.csv")), table_csv(&objects))
+            .map_err(|error| error.to_string())?;
     }
-    fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())?;
+    fs::write(
+        directory.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
     let mut file_count = 0;
     if include_originals {
         let mut statement = connection.prepare(
             "SELECT f.storage_path,f.original_name,d.document_type,d.id FROM documents d JOIN document_versions v ON v.document_id=d.id AND v.is_current_file=1 JOIN files f ON f.id=v.file_id WHERE d.trashed_at IS NULL ORDER BY d.id,f.id"
         ).map_err(|error| error.to_string())?;
-        let files = statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?)))
-            .map_err(|error| error.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|error| error.to_string())?;
+        let files = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?;
         for (storage_path, original_name, document_type, document_id) in files {
             let source = data_root.join(storage_path);
-            if !source.is_file() { continue; }
+            if !source.is_file() {
+                continue;
+            }
             let name = format!("{document_id}-{}", safe_export_name(&original_name));
             let target = match folder_layout {
                 "flat" => directory.join("documents").join(name),
-                "type" => directory.join("documents").join(safe_export_name(&document_type)).join(name),
-                _ => directory.join("documents").join(format!("{document_id}")).join(safe_export_name(&original_name)),
+                "type" => directory
+                    .join("documents")
+                    .join(safe_export_name(&document_type))
+                    .join(name),
+                _ => directory
+                    .join("documents")
+                    .join(format!("{document_id}"))
+                    .join(safe_export_name(&original_name)),
             };
-            if let Some(parent) = target.parent() { fs::create_dir_all(parent).map_err(|error| error.to_string())?; }
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
             fs::copy(source, target).map_err(|error| error.to_string())?;
             file_count += 1;
         }
     }
     if format == "csv" {
-        return Ok(DataExportResult { export_path: directory.to_string_lossy().into_owned(), format: format.into(), table_count: EXPORT_TABLES.len(), row_count, file_count, sha256: None });
+        return Ok(DataExportResult {
+            export_path: directory.to_string_lossy().into_owned(),
+            format: format.into(),
+            table_count: EXPORT_TABLES.len(),
+            row_count,
+            file_count,
+            sha256: None,
+        });
     }
     let archive_path = export_root.join(format!("vault-data-{stamp}.vaultzip"));
     let output = fs::File::create(&archive_path).map_err(|error| error.to_string())?;
     let mut zip = zip::ZipWriter::new(output);
-    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
     let mut entries = Vec::new();
     collect_backup_entries(&directory, &directory, &mut entries)?;
     for (path, relative) in &entries {
-        zip.start_file(relative, options).map_err(|error| error.to_string())?;
+        zip.start_file(relative, options)
+            .map_err(|error| error.to_string())?;
         let mut input = fs::File::open(path).map_err(|error| error.to_string())?;
         std::io::copy(&mut input, &mut zip).map_err(|error| error.to_string())?;
     }
     zip.finish().map_err(|error| error.to_string())?;
     let _ = fs::remove_dir_all(&directory);
     let hash = sha256_file(&archive_path).map_err(|error| error.to_string())?;
-    record_audit_event(&connection, "data_export_created", "export", None, &format!("{format}; {row_count} rows; {file_count} originals")).map_err(|error| error.to_string())?;
-    Ok(DataExportResult { export_path: archive_path.to_string_lossy().into_owned(), format: format.into(), table_count: EXPORT_TABLES.len(), row_count, file_count, sha256: Some(hash) })
+    record_audit_event(
+        &connection,
+        "data_export_created",
+        "export",
+        None,
+        &format!("{format}; {row_count} rows; {file_count} originals"),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(DataExportResult {
+        export_path: archive_path.to_string_lossy().into_owned(),
+        format: format.into(),
+        table_count: EXPORT_TABLES.len(),
+        row_count,
+        file_count,
+        sha256: Some(hash),
+    })
 }
 
 #[tauri::command]
@@ -5880,9 +6262,13 @@ fn export_user_profile(
 ) -> Result<String, String> {
     serde_json::from_str::<serde_json::Value>(&dashboard_layout_json)
         .map_err(|error| format!("Ogiltig dashboardlayout: {error}"))?;
-    let data_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
     initialize_vault_at(&data_root).map_err(|error| error.to_string())?;
-    let connection = Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
+    let connection =
+        Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
     let profile = serde_json::json!({
         "format": "vault-user-profile",
         "version": 1,
@@ -5895,13 +6281,20 @@ fn export_user_profile(
     let root = data_root.join("exports");
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     let path = root.join(format!("vault-profil-{}.json", epoch_seconds()));
-    fs::write(&path, serde_json::to_vec_pretty(&profile).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())?;
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&profile).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
     Ok(path.to_string_lossy().into_owned())
 }
 
 fn object_string(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
-    object.get(key).and_then(|value| value.as_str()).unwrap_or_default().to_string()
+    object
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[tauri::command]
@@ -5910,22 +6303,38 @@ fn import_user_profile(app: tauri::AppHandle, path: String) -> Result<ProfileImp
     if bytes.len() > 10 * 1024 * 1024 {
         return Err("Profilfilen är större än 10 MB".into());
     }
-    let profile: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| format!("Ogiltig profilfil: {error}"))?;
+    let profile: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| format!("Ogiltig profilfil: {error}"))?;
     if profile["format"] != "vault-user-profile" || profile["version"] != 1 {
         return Err("Profilformatet eller versionen stöds inte".into());
     }
-    let layout = profile.get("dashboard_layout").cloned().unwrap_or_else(|| serde_json::json!({}));
-    let data_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let layout = profile
+        .get("dashboard_layout")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
     initialize_vault_at(&data_root).map_err(|error| error.to_string())?;
-    let mut connection = Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
-    let searches = profile["saved_searches"].as_array().cloned().unwrap_or_default();
+    let mut connection =
+        Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let searches = profile["saved_searches"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     for item in &searches {
         let object = item.as_object().ok_or("Ogiltig sparad sökning")?;
         transaction.execute("INSERT INTO saved_searches(name,query,pinned) VALUES(?1,?2,?3) ON CONFLICT(name) DO UPDATE SET query=excluded.query,pinned=excluded.pinned,updated_at=CURRENT_TIMESTAMP",
             params![object_string(object,"name"),object_string(object,"query"),object.get("pinned").and_then(|value|value.as_i64()).unwrap_or(0)]).map_err(|error|error.to_string())?;
     }
-    let words = profile["code_words"].as_array().cloned().unwrap_or_default();
+    let words = profile["code_words"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     for item in &words {
         let object = item.as_object().ok_or("Ogiltigt kodord")?;
         transaction.execute("INSERT INTO code_words(vault_id,word,description) VALUES(1,?1,?2) ON CONFLICT(vault_id,word) DO UPDATE SET description=excluded.description",
@@ -5943,9 +6352,28 @@ fn import_user_profile(app: tauri::AppHandle, path: String) -> Result<ProfileImp
         transaction.execute("INSERT INTO theme_profiles(name,base_mode,accent,surface_main,surface_sidebar,surface_raised,text_primary,text_secondary,border_color,radius_px,font_scale,density,motion,is_builtin,is_active) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,0) ON CONFLICT(name) DO NOTHING",
             params![format!("{} (importerat)",object_string(object,"name")),object_string(object,"base_mode"),object_string(object,"accent"),object_string(object,"surface_main"),object_string(object,"surface_sidebar"),object_string(object,"surface_raised"),object_string(object,"text_primary"),object_string(object,"text_secondary"),object_string(object,"border_color"),object.get("radius_px").and_then(|v|v.as_i64()).unwrap_or(12),object.get("font_scale").and_then(|v|v.as_f64()).unwrap_or(1.0),object_string(object,"density"),object_string(object,"motion")]).map_err(|error|error.to_string())?;
     }
-    record_audit_event(&transaction, "user_profile_imported", "settings", None, &format!("{} searches; {} themes; {} code words; {} rules", searches.len(), themes.len(), words.len(), rules.len())).map_err(|error|error.to_string())?;
+    record_audit_event(
+        &transaction,
+        "user_profile_imported",
+        "settings",
+        None,
+        &format!(
+            "{} searches; {} themes; {} code words; {} rules",
+            searches.len(),
+            themes.len(),
+            words.len(),
+            rules.len()
+        ),
+    )
+    .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
-    Ok(ProfileImportResult { saved_searches: searches.len(), themes: themes.len(), code_words: words.len(), rules: rules.len(), dashboard_layout_json: layout.to_string() })
+    Ok(ProfileImportResult {
+        saved_searches: searches.len(),
+        themes: themes.len(),
+        code_words: words.len(),
+        rules: rules.len(),
+        dashboard_layout_json: layout.to_string(),
+    })
 }
 
 #[tauri::command]
@@ -8458,7 +8886,10 @@ fn queue_system_job(app: tauri::AppHandle, job_type: String) -> Result<Vec<JobSu
     if !allowed.contains(&job_type.as_str()) {
         return Err("Jobbtypen stöds inte".into());
     }
-    let data_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
     initialize_vault_at(&data_root).map_err(|error| error.to_string())?;
     queue_system_job_at(&data_root, &job_type).map_err(|error| error.to_string())?;
     list_background_jobs_at(&data_root).map_err(|error| error.to_string())
@@ -8489,7 +8920,10 @@ fn control_background_job(
     job_id: i64,
     action: String,
 ) -> Result<Vec<JobSummary>, String> {
-    let data_root = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
     initialize_vault_at(&data_root).map_err(|error| error.to_string())?;
     control_background_job_at(&data_root, job_id, &action).map_err(|error| error.to_string())?;
     list_background_jobs_at(&data_root).map_err(|error| error.to_string())
@@ -8528,16 +8962,29 @@ fn process_next_system_job_at(data_root: &Path) -> rusqlite::Result<bool> {
         "SELECT id,job_type,attempts,max_attempts FROM jobs WHERE vault_id=1 AND target_type='vault' AND status IN('queued','resuming') AND pause_requested=0 AND cancel_requested=0 AND (next_run_at IS NULL OR datetime(next_run_at)<=CURRENT_TIMESTAMP) AND (depends_on_job_id IS NULL OR EXISTS(SELECT 1 FROM jobs parent WHERE parent.id=jobs.depends_on_job_id AND parent.status='completed')) ORDER BY priority,id LIMIT 1",
         [], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,row.get::<_,i64>(3)?)),
     ).optional()?;
-    let Some((job_id, job_type, attempts, max_attempts)) = job else { return Ok(false); };
+    let Some((job_id, job_type, attempts, max_attempts)) = job else {
+        return Ok(false);
+    };
     connection.execute("UPDATE jobs SET status='running',attempts=attempts+1,progress_current=0,progress_total=1,updated_at=CURRENT_TIMESTAMP WHERE id=?1",[job_id])?;
     drop(connection);
     let outcome: Result<String, String> = match job_type.as_str() {
-        "archive_analysis" => analyze_production_archive_at(data_root).map(|value| format!("{} dokument analyserade", value.reindexed_document_count)).map_err(|error|error.to_string()),
-        "reindex" => rebuild_production_search_index_at(data_root).map(|value| format!("{} dokument indexerade", value.indexed_document_count)).map_err(|error|error.to_string()),
-        "backup" => create_local_backup_at(data_root).map(|value| format!("Backup skapad: {} dokument", value.document_count)).map_err(|error|error.to_string()),
-        "integrity_scan" => scan_file_integrity_at(data_root).map(|value| format!("{} filer kontrollerade", value.checked_files)).map_err(|error|error.to_string()),
-        "portable_export" => create_portable_archive_at(data_root).map(|value| format!("Export skapad: {}", value.archive_path)),
-        "dirty_recompute" => process_dirty_documents_at(data_root, 10_000).map(|count| format!("{count} ändrade dokument uppdaterade")).map_err(|error|error.to_string()),
+        "archive_analysis" => analyze_production_archive_at(data_root)
+            .map(|value| format!("{} dokument analyserade", value.reindexed_document_count))
+            .map_err(|error| error.to_string()),
+        "reindex" => rebuild_production_search_index_at(data_root)
+            .map(|value| format!("{} dokument indexerade", value.indexed_document_count))
+            .map_err(|error| error.to_string()),
+        "backup" => create_local_backup_at(data_root)
+            .map(|value| format!("Backup skapad: {} dokument", value.document_count))
+            .map_err(|error| error.to_string()),
+        "integrity_scan" => scan_file_integrity_at(data_root)
+            .map(|value| format!("{} filer kontrollerade", value.checked_files))
+            .map_err(|error| error.to_string()),
+        "portable_export" => create_portable_archive_at(data_root)
+            .map(|value| format!("Export skapad: {}", value.archive_path)),
+        "dirty_recompute" => process_dirty_documents_at(data_root, 10_000)
+            .map(|count| format!("{count} ändrade dokument uppdaterade"))
+            .map_err(|error| error.to_string()),
         _ => Err("Okänd beständig jobbtyp".into()),
     };
     let connection = Connection::open(data_root.join("vault.db"))?;
@@ -8546,7 +8993,11 @@ fn process_next_system_job_at(data_root: &Path) -> rusqlite::Result<bool> {
             connection.execute("UPDATE jobs SET status='completed',progress_current=1,result_summary=?1,checkpoint_json='{\"completed\":true}',updated_at=CURRENT_TIMESTAMP WHERE id=?2",params![summary,job_id])?;
         }
         Err(error) => {
-            let status = if attempts + 1 >= max_attempts { "requires_action" } else { "failed" };
+            let status = if attempts + 1 >= max_attempts {
+                "requires_action"
+            } else {
+                "failed"
+            };
             connection.execute("UPDATE jobs SET status=?1,error_code='job_failed',result_summary=?2,next_run_at=datetime('now','+1 minute'),updated_at=CURRENT_TIMESTAMP WHERE id=?3",params![status,error.chars().take(500).collect::<String>(),job_id])?;
         }
     }
@@ -8556,8 +9007,12 @@ fn process_next_system_job_at(data_root: &Path) -> rusqlite::Result<bool> {
 fn process_dirty_documents_at(data_root: &Path, limit: i64) -> rusqlite::Result<i64> {
     let mut connection = Connection::open(data_root.join("vault.db"))?;
     let ids = {
-        let mut statement = connection.prepare("SELECT document_id FROM dirty_documents ORDER BY marked_at,document_id LIMIT ?1")?;
-        let values = statement.query_map([limit], |row| row.get::<_,i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut statement = connection.prepare(
+            "SELECT document_id FROM dirty_documents ORDER BY marked_at,document_id LIMIT ?1",
+        )?;
+        let values = statement
+            .query_map([limit], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         values
     };
     let transaction = connection.transaction()?;
@@ -8574,7 +9029,10 @@ fn process_dirty_documents_at(data_root: &Path, limit: i64) -> rusqlite::Result<
             apply_auto_entities(&transaction, document_id, &title, &document_type, &text)?;
             processed += 1;
         }
-        transaction.execute("DELETE FROM dirty_documents WHERE document_id=?1",[document_id])?;
+        transaction.execute(
+            "DELETE FROM dirty_documents WHERE document_id=?1",
+            [document_id],
+        )?;
     }
     transaction.commit()?;
     Ok(processed)
@@ -12046,6 +12504,10 @@ pub fn run() {
             set_plugin_enabled,
             run_plugin,
             remove_plugin,
+            list_external_import_sources,
+            configure_external_import_source,
+            preview_external_import,
+            import_external_selection,
             export_document_secure,
             list_theme_profiles,
             save_theme_profile,
@@ -12119,7 +12581,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let status = initialize_vault_at(temp_dir.path()).expect("vault initialization");
 
-        assert_eq!(status.schema_version, 29);
+        assert_eq!(status.schema_version, 30);
         assert_eq!(status.testlab_document_count, 4);
         assert!(status.production_vault_ready);
         assert!(PathBuf::from(status.database_path).exists());
@@ -12922,7 +13384,10 @@ fn persists_controls_and_completes_system_jobs_incrementally() {
     let imported = import_document_at(temp.path(), &source).expect("import");
     apply_batch_action_at(temp.path(), vec![imported.document.id], "add_tag", "Ändrad")
         .expect("dirty");
-    assert_eq!(process_dirty_documents_at(temp.path(), 25).expect("process dirty"), 1);
+    assert_eq!(
+        process_dirty_documents_at(temp.path(), 25).expect("process dirty"),
+        1
+    );
     let connection = Connection::open(temp.path().join("vault.db")).expect("database");
     let dirty: i64 = connection
         .query_row("SELECT COUNT(*) FROM dirty_documents", [], |row| row.get(0))
@@ -12931,7 +13396,10 @@ fn persists_controls_and_completes_system_jobs_incrementally() {
     drop(connection);
 
     let job_id = queue_system_job_at(temp.path(), "backup").expect("queue");
-    assert_eq!(queue_system_job_at(temp.path(), "backup").expect("idempotent queue"), job_id);
+    assert_eq!(
+        queue_system_job_at(temp.path(), "backup").expect("idempotent queue"),
+        job_id
+    );
     control_background_job_at(temp.path(), job_id, "pause").expect("pause");
     assert!(!process_next_system_job_at(temp.path()).expect("paused not processed"));
     control_background_job_at(temp.path(), job_id, "resume").expect("resume");
@@ -12940,7 +13408,11 @@ fn persists_controls_and_completes_system_jobs_incrementally() {
     let job = jobs.iter().find(|item| item.id == job_id).expect("job");
     assert_eq!(job.status, "completed");
     assert_eq!(job.progress_current, 1);
-    assert!(job.result_summary.as_deref().unwrap_or_default().contains("Backup"));
+    assert!(job
+        .result_summary
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Backup"));
 
     let cancelled = queue_system_job_at(temp.path(), "reindex").expect("queue cancelled");
     control_background_job_at(temp.path(), cancelled, "cancel").expect("cancel");
@@ -13009,7 +13481,9 @@ fn cleans_only_controlled_temporary_files_and_rejects_zip_bombs() {
     assert!(permanent.exists());
     assert!(validate_zip_entry_size(11 * 1024 * 1024, 1, 100 * 1024 * 1024).is_err());
     assert!(validate_zip_entry_size(1024, 512, 100 * 1024 * 1024).is_ok());
-    assert!(validate_zip_entry_size(101 * 1024 * 1024, 50 * 1024 * 1024, 100 * 1024 * 1024).is_err());
+    assert!(
+        validate_zip_entry_size(101 * 1024 * 1024, 50 * 1024 * 1024, 100 * 1024 * 1024).is_err()
+    );
 }
 
 #[test]
@@ -13061,7 +13535,10 @@ fn exports_complete_json_csv_and_vaultzip_data_sets() {
         serde_json::from_slice(&fs::read(&json.export_path).expect("read json")).expect("parse");
     assert_eq!(value["format"], "vault-data-export");
     assert_eq!(value["version"], 1);
-    assert_eq!(value["tables"]["documents"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        value["tables"]["documents"].as_array().map(Vec::len),
+        Some(1)
+    );
     assert!(json.sha256.is_some());
 
     let csv = create_data_export_at(temp.path(), "csv", true, "type").expect("csv");
@@ -13073,7 +13550,9 @@ fn exports_complete_json_csv_and_vaultzip_data_sets() {
     let mut archive = zip::ZipArchive::new(file).expect("zip");
     assert!(archive.by_name("manifest.json").is_ok());
     assert!(archive.by_name("documents.csv").is_ok());
-    assert!(archive.file_names().any(|name| name.starts_with("documents/")));
+    assert!(archive
+        .file_names()
+        .any(|name| name.starts_with("documents/")));
     assert!(create_data_export_at(temp.path(), "xml", false, "vault").is_err());
 }
 
@@ -13112,6 +13591,9 @@ fn rejects_plugins_with_network_or_ai_access() {
             value: "Ekonomi".into(),
         }],
         ai_free: true,
+        api_version: default_plugin_api_version(),
+        adapter_kind: default_plugin_adapter_kind(),
+        resource_limit: default_plugin_resource_limit(),
     };
     assert!(validate_plugin_manifest(&safe).is_ok());
     let network = PluginManifest {
@@ -13123,6 +13605,9 @@ fn rejects_plugins_with_network_or_ai_access() {
         data_access: vec!["metadata".into()],
         actions: vec![],
         ai_free: true,
+        api_version: default_plugin_api_version(),
+        adapter_kind: default_plugin_adapter_kind(),
+        resource_limit: default_plugin_resource_limit(),
     };
     assert!(validate_plugin_manifest(&network)
         .unwrap_err()
@@ -13136,10 +13621,21 @@ fn rejects_plugins_with_network_or_ai_access() {
         data_access: vec![],
         actions: vec![],
         ai_free: false,
+        api_version: default_plugin_api_version(),
+        adapter_kind: default_plugin_adapter_kind(),
+        resource_limit: default_plugin_resource_limit(),
     };
     assert!(validate_plugin_manifest(&ai)
         .unwrap_err()
         .contains("ai_free"));
+    let incompatible = PluginManifest {
+        api_version: "2.0".into(),
+        ai_free: true,
+        ..safe
+    };
+    assert!(validate_plugin_manifest(&incompatible)
+        .unwrap_err()
+        .contains("API 2.0"));
 }
 
 #[test]

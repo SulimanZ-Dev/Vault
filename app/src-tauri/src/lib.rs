@@ -813,7 +813,7 @@ struct IntegrityScanReport {
     warnings: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct PluginManifest {
     id: String,
     name: String,
@@ -834,6 +834,10 @@ struct PluginManifest {
     adapter_kind: String,
     #[serde(default = "default_plugin_resource_limit")]
     resource_limit: i64,
+    #[serde(default)]
+    publisher_public_key: Option<String>,
+    #[serde(default)]
+    publisher_signature: Option<String>,
 }
 
 fn default_plugin_api_version() -> String {
@@ -846,11 +850,50 @@ fn default_plugin_resource_limit() -> i64 {
     10_000
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct PluginAction {
     action_type: String,
     match_text: String,
     value: String,
+}
+
+fn verify_plugin_publisher_signature(manifest: &PluginManifest) -> Result<&'static str, String> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    match (
+        &manifest.publisher_public_key,
+        &manifest.publisher_signature,
+    ) {
+        (None, None) => Ok("unsigned_local"),
+        (Some(public_key), Some(signature)) => {
+            let key_bytes = base64::engine::general_purpose::STANDARD
+                .decode(public_key)
+                .map_err(|_| "Ogiltig Base64-publik nyckel".to_string())?;
+            let signature_bytes = base64::engine::general_purpose::STANDARD
+                .decode(signature)
+                .map_err(|_| "Ogiltig Base64-signatur".to_string())?;
+            let key = VerifyingKey::from_bytes(
+                &key_bytes
+                    .try_into()
+                    .map_err(|_| "Ed25519-nyckeln måste vara 32 byte".to_string())?,
+            )
+            .map_err(|_| "Ogiltig Ed25519-nyckel".to_string())?;
+            let signature = Signature::from_bytes(
+                &signature_bytes
+                    .try_into()
+                    .map_err(|_| "Ed25519-signaturen måste vara 64 byte".to_string())?,
+            );
+            let mut value = serde_json::to_value(manifest).map_err(|e| e.to_string())?;
+            value
+                .as_object_mut()
+                .ok_or("Ogiltigt manifest")?
+                .remove("publisher_signature");
+            let payload = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+            key.verify(&payload, &signature)
+                .map_err(|_| "Utgivarsignaturen är ogiltig".to_string())?;
+            Ok("ed25519_verified")
+        }
+        _ => Err("Utgivarnyckel och signatur måste anges tillsammans".into()),
+    }
 }
 
 #[derive(Serialize)]
@@ -3615,6 +3658,7 @@ fn validate_plugin_manifest(manifest: &PluginManifest) -> Result<(), String> {
     if !(100..=100_000).contains(&manifest.resource_limit) {
         return Err("Pluginens resource_limit måste vara 100–100000".into());
     }
+    verify_plugin_publisher_signature(manifest)?;
     let allowed = [
         "read_metadata",
         "read_text",
@@ -3722,8 +3766,9 @@ fn install_plugin(
     .map_err(|e| e.to_string())?;
     fs::write(&target, &normalized).map_err(|e| e.to_string())?;
     let manifest_sha256 = format!("{:x}", Sha256::digest(&normalized));
+    let signature_status = verify_plugin_publisher_signature(&manifest)?;
     let connection = Connection::open(data_root.join("vault.db")).map_err(|e| e.to_string())?;
-    connection.execute("INSERT INTO plugins(id,name,version,description,manifest_path,capabilities_json,data_access_json,enabled,approved,api_version,adapter_kind,manifest_sha256,signature_status,resource_limit) VALUES(?1,?2,?3,?4,?5,?6,?7,0,0,?8,?9,?10,'local_checksum',?11) ON CONFLICT(id) DO UPDATE SET name=excluded.name,version=excluded.version,description=excluded.description,manifest_path=excluded.manifest_path,capabilities_json=excluded.capabilities_json,data_access_json=excluded.data_access_json,api_version=excluded.api_version,adapter_kind=excluded.adapter_kind,manifest_sha256=excluded.manifest_sha256,signature_status=excluded.signature_status,resource_limit=excluded.resource_limit,enabled=0,approved=0,updated_at=CURRENT_TIMESTAMP",params![manifest.id,manifest.name,manifest.version,manifest.description,target.to_string_lossy(),serde_json::to_string(&manifest.capabilities).unwrap_or("[]".into()),serde_json::to_string(&manifest.data_access).unwrap_or("[]".into()),manifest.api_version,manifest.adapter_kind,manifest_sha256,manifest.resource_limit]).map_err(|e|e.to_string())?;
+    connection.execute("INSERT INTO plugins(id,name,version,description,manifest_path,capabilities_json,data_access_json,enabled,approved,api_version,adapter_kind,manifest_sha256,signature_status,resource_limit) VALUES(?1,?2,?3,?4,?5,?6,?7,0,0,?8,?9,?10,?11,?12) ON CONFLICT(id) DO UPDATE SET name=excluded.name,version=excluded.version,description=excluded.description,manifest_path=excluded.manifest_path,capabilities_json=excluded.capabilities_json,data_access_json=excluded.data_access_json,api_version=excluded.api_version,adapter_kind=excluded.adapter_kind,manifest_sha256=excluded.manifest_sha256,signature_status=excluded.signature_status,resource_limit=excluded.resource_limit,enabled=0,approved=0,updated_at=CURRENT_TIMESTAMP",params![manifest.id,manifest.name,manifest.version,manifest.description,target.to_string_lossy(),serde_json::to_string(&manifest.capabilities).unwrap_or("[]".into()),serde_json::to_string(&manifest.data_access).unwrap_or("[]".into()),manifest.api_version,manifest.adapter_kind,manifest_sha256,signature_status,manifest.resource_limit]).map_err(|e|e.to_string())?;
     connection.execute("INSERT INTO plugin_events(plugin_id,event_type,safe_summary) VALUES(?1,'installed','Manifest validated; plugin remains disabled pending approval')",[&manifest.id]).map_err(|e|e.to_string())?;
     record_audit_event(
         &connection,
@@ -5332,6 +5377,47 @@ fn run_test_center_at(data_root: &Path) -> rusqlite::Result<TestCenterReport> {
         salary_results
             .first()
             .is_some_and(|result| result.document.document_type.contains("nespecifikation")),
+    );
+
+    let passport_fixture = "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<\nL898902C36UTO7408122F1204159ZE184226B<<<<<10";
+    let first_passport = parse_td3_mrz(passport_fixture);
+    let second_passport = parse_td3_mrz(passport_fixture);
+    let passports_valid = [&first_passport, &second_passport].iter().all(|parsed| {
+        parsed
+            .as_ref()
+            .and_then(|fields| fields.get("mrz_valid"))
+            .and_then(|value| value.as_bool())
+            == Some(true)
+    });
+    push_test_case(
+        &mut cases,
+        "Acceptance: flera pass och kontrollsiffror",
+        "Två separata TD3-underlag valideras deterministiskt utan namn-gissning",
+        if passports_valid {
+            "2/2 MRZ validerade med dokument-, födelse- och utgångskontrollsiffra"
+        } else {
+            "MRZ-validering misslyckades"
+        },
+        passports_valid,
+    );
+
+    let testlab_db = data_root.join("testlab").join("vault-test.db");
+    let mut parallel_connection = Connection::open(testlab_db)?;
+    let parallel_transaction = parallel_connection.transaction()?;
+    parallel_transaction.execute("INSERT INTO jobs(vault_id,job_type,target_type,status,payload_json,checkpoint_json) VALUES(1,'test_parallel_a','vault','queued','{}','{}')", [])?;
+    parallel_transaction.execute("INSERT INTO jobs(vault_id,job_type,target_type,status,payload_json,checkpoint_json) VALUES(1,'test_parallel_b','vault','queued','{}','{}')", [])?;
+    let parallel_count: i64 = parallel_transaction.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE job_type LIKE 'test_parallel_%' AND status='queued'",
+        [],
+        |row| row.get(0),
+    )?;
+    parallel_transaction.rollback()?;
+    push_test_case(
+        &mut cases,
+        "Acceptance: parallella beständiga jobb",
+        "Två jobb kan köas isolerat och transaktionen kan rullas tillbaka",
+        &format!("{parallel_count}/2 jobb köades; Test Lab-transaktionen återställdes"),
+        parallel_count == 2,
     );
 
     let backups = list_local_backups_at(data_root)?;
@@ -13790,6 +13876,8 @@ fn rejects_plugins_with_network_or_ai_access() {
         api_version: default_plugin_api_version(),
         adapter_kind: default_plugin_adapter_kind(),
         resource_limit: default_plugin_resource_limit(),
+        publisher_public_key: None,
+        publisher_signature: None,
     };
     assert!(validate_plugin_manifest(&safe).is_ok());
     let network = PluginManifest {
@@ -13804,6 +13892,8 @@ fn rejects_plugins_with_network_or_ai_access() {
         api_version: default_plugin_api_version(),
         adapter_kind: default_plugin_adapter_kind(),
         resource_limit: default_plugin_resource_limit(),
+        publisher_public_key: None,
+        publisher_signature: None,
     };
     assert!(validate_plugin_manifest(&network)
         .unwrap_err()
@@ -13820,6 +13910,8 @@ fn rejects_plugins_with_network_or_ai_access() {
         api_version: default_plugin_api_version(),
         adapter_kind: default_plugin_adapter_kind(),
         resource_limit: default_plugin_resource_limit(),
+        publisher_public_key: None,
+        publisher_signature: None,
     };
     assert!(validate_plugin_manifest(&ai)
         .unwrap_err()
@@ -13832,6 +13924,15 @@ fn rejects_plugins_with_network_or_ai_access() {
     assert!(validate_plugin_manifest(&incompatible)
         .unwrap_err()
         .contains("API 2.0"));
+    let half_signed = PluginManifest {
+        publisher_public_key: Some("AAAA".into()),
+        publisher_signature: None,
+        api_version: "1.0".into(),
+        ..incompatible
+    };
+    assert!(validate_plugin_manifest(&half_signed)
+        .unwrap_err()
+        .contains("måste anges tillsammans"));
 }
 
 #[test]

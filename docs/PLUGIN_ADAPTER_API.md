@@ -6,6 +6,13 @@ manifest, stores a normalized copy, records its SHA-256 checksum, and leaves it
 disabled. The user must approve the displayed capabilities before it can run. A
 changed manifest is automatically disabled.
 
+Publishers may add `publisher_public_key` and `publisher_signature` as standard
+Base64-encoded Ed25519 values. The signature covers compact JSON serialization of
+the parsed manifest with `publisher_signature` removed. Vault rejects malformed or
+invalid signatures and displays `ed25519_verified` only after cryptographic
+verification. Unsigned local manifests remain allowed but are clearly marked
+`unsigned_local` and still require explicit user approval.
+
 Supported `adapter_kind` values are `ocr_engine`, `importer`,
 `metadata_extractor`, `search_parser`, `exporter`, `dashboard_widget`, and
 `domain_model`. API 1.0 executes the safe `metadata_extractor` action contract;

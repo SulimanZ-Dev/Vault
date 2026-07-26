@@ -9,26 +9,26 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 - [x] ✅ Miniatyrer med fönstrad lazy rendering
 - [x] ✅ Valbart textlager och lokala sökträffar
 - [x] ✅ Versions- och sidbundna markeringar med normaliserade koordinater
-- [ ] 🔷 Claim till exakt källsida, söktext och koordinatmarkering
-- [ ] 🔷 Dokumentjämförelse sida vid sida med ordningsbevarad text och markerade skillnader
+- [x] ✅ Claim till exakt källsida, söktext och koordinatmarkering
+- [x] ✅ Dokumentjämförelse sida vid sida med ordningsbevarad text och markerade skillnader
 
 ## 2. Djupare områdesmodeller
 - [x] ✅ Grundläggande domänregister (schema v11)
 - [x] ✅ Boende-, rese- och myndighetsvyer (schema v19)
-- [ ] 🔷 Deterministisk TD3-MRZ-parser för pass med kontrollsiffror och källfält
-- [ ] 🔶 Fordon och service (schema samt lokalt utdrag av VIN, regnummer, miltal och verkstad)
-- [ ] 🔶 Garanti och produkter (schema samt lokalt utdrag av garantiperiod, slut och reklamation)
-- [ ] 🔶 Anställning (schema samt lokalt utdrag av alias, organisationsnummer, befattning och sysselsättningsgrad)
-- [ ] 🔶 Lönehistorik och tilläggsavtal (separata historiktabeller och lokala källfält)
-- [ ] 🔷 Konfliktgranskning där användaren väljer källa/båda/ingen och beslutet låses
+- [x] ✅ Deterministisk TD3-MRZ-parser för pass med kontrollsiffror och källfält
+- [x] ✅ Fordon och service med register, historik och lokalt källbundet utdrag
+- [x] ✅ Garanti och produkter med garantiperiod, slut, reklamation och källfält
+- [x] ✅ Anställning med alias, organisationsnummer, befattning och sysselsättningsgrad
+- [x] ✅ Lönehistorik och tilläggsavtal i separata historiktabeller med lokala källfält
+- [x] ✅ Konfliktgranskning där användaren väljer källa/båda/ingen och beslutet låses
 
 ## 3. Sökning och sparade sökningar
 - [x] ✅ Fritextsökning med FTS5
 - [x] ✅ Sökoperatorer (type:, tag:, date:, status:, -ord, exakt fras)
-- [ ] 🔷 Deterministiskt språkstöd för vanliga svenska böjningsformer, sammansättningar, synonymer och OCR-felen 0/o samt 1/l
+- [x] ✅ Deterministiskt språkstöd för vanliga svenska böjningsformer, sammansättningar, synonymer och OCR-felen 0/o samt 1/l
 - [x] ✅ Kombinerbara filter för dokumenttyp, kategori, arbetsgivare/entitet, status, filformat och datumintervall
 - [x] ✅ Sparade sökningar körs dynamiskt mot aktuellt lokalt arkiv och kan fästas i navigationen
-- [ ] 🔷 Versionsvaliderad, transaktionell import/export av layout, sökningar, teman, kodord och regler
+- [x] ✅ Versionsvaliderad, transaktionell import/export av layout, sökningar, teman, kodord och regler
 
 ## 4. Analys, regler och bakgrundsjobb
 - [x] ✅ Jobb-tabell med status (schema v9)
@@ -43,7 +43,7 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 - [x] ✅ Exportformat (JSON, CSV och versionerat .vaultzip-paket)
 - [x] ✅ Mappstruktur (platt, Vault-struktur eller dokumenttyp med kollisionssäkra namn)
 - [x] ✅ .vaultarchive- och .vaultzip-format dokumenterade och versionsstyrda
-- [ ] 🔶 Portabilitetstest dokumenterat och automatiserat där möjligt; fysisk ren Windows-profil återstår
+- [x] ✅ Portabilitetstest dokumenterat och automatiserat med isolerade datarötter samt verifierad release-EXE och NSIS-installer
 
 ## 6. Backup och temporär säkerhet
 - [x] ✅ Lokal backup (full, inkrementell)
@@ -62,7 +62,7 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 - [x] ✅ Hotmodell och automatiska tester för traversal, ZIP-bomber, kompressionsgrad, symlänkar och storleksgränser
 - [x] ✅ Nyckelhantering med Windows DPAPI för snabb upplåsning; privata original och backup använder AES-256
 - [x] ✅ Loggaudit: releasebygget skriver inga applikationsloggar och säkerhetshändelser använder innehållsfria sammanfattningar
-- [ ] 🔷 Plugin- och exporträttigheter (backendvalidering och synlig pluginmatris klara; separat exportpolicy återstår)
+- [x] ✅ Plugin- och exporträttigheter med backendvalidering, synlig behörighetsmatris, explicit aktivering och skyddad privatdata
 
 ## 8. Prestanda och skalverifiering
 - [x] ✅ Testgenerator (100, 1 000, 10 000, 50 000 dokument)
@@ -73,16 +73,16 @@ Statusar: ✅ Fullt implementerad | 🔷 Implementerad (kräver EXE-verifiering)
 
 ## 9. Plugins och externa importörer
 - [x] ✅ Deklarativt sandboxat pluginsystem (schema v22)
-- [ ] 🔷 Versionerade adapter-API:er (API 1.0, kompatibilitet, typer, resursgräns och dokumentation klara; fler körbara adapterkontrakt återstår)
+- [x] ✅ Versionerade adapter-API:er 1.0 med kompatibilitet, sju adaptertyper, resursgräns, felisolering, exempel och dokumentation
 - [x] ✅ Externa importörer (Google Drive, OneDrive, Gmail, Outlook via frivillig lokal export-/synkmapp med preview, exakt urval och bekräftelse)
-- [ ] 🔷 Plugin-tillit (SHA-256, manipulationsavstängning och användargodkännande klara; kryptografisk utgivarsignering återstår)
+- [x] ✅ Plugin-tillit med Ed25519-utgivarsignering, SHA-256, manipulationsavstängning och användargodkännande
 
 ## 10. Test Lab och slutacceptans
 - [x] ✅ Isolerad Test Lab-databas
 - [x] ✅ Test Center med godkända fall
 - [x] ✅ Skaltest
-- [ ] ❌ End-to-end-scenarier (DAGAB, lön juni, flera pass, parallella jobb, etc.)
+- [x] ✅ End-to-end-scenarier för DAGAB, lön juni, flera pass, parallella jobb, backup, audit, OCR och konflikter
 - [x] ✅ Felsökning i Test Lab med isolerade verkliga felprov och säker exporterbar rapport
 - [x] ✅ Avbrottsscenarier med beständig checkpoint, paus, resume, cancel och retry
-- [ ] ❌ UI-tester
-- [ ] ❌ Tillgänglighetsaudit
+- [x] ✅ UI-tester med 12 automatiska kontroller samt direkt release-EXE-prov av navigation, säkerhet, plugins och Test Center
+- [x] ✅ Tillgänglighetsaudit för svenska, namn, semantik, fokus, tangentbord, Escape, reducerad rörelse, teman och låsskärm

@@ -27,6 +27,14 @@ type VaultInitStatus = {
   testlab_document_count: number
 }
 
+type PurgeVaultResult = {
+  removed_root_entries: number
+  schema_version: number
+  production_document_count: number
+  testlab_document_count: number
+  data_root: string
+}
+
 type DocumentSummary = {
   id: number
   title: string
@@ -605,6 +613,10 @@ function App() {
   const [savedSearches, setSavedSearches] = useState<SavedSearchSummary[]>([])
   const [ruleRun, setRuleRun] = useState<RuleRunResult | null>(null)
   const [securityStatus, setSecurityStatus] = useState<SecurityStatus>({mode:'comfortable',pin_configured:false,auto_lock_minutes:15,mask_sensitive:true,locked_document_count:0,private_document_count:0})
+  const [showPurgeVault,setShowPurgeVault]=useState(false)
+  const [purgePhrase,setPurgePhrase]=useState('')
+  const [isPurgingVault,setIsPurgingVault]=useState(false)
+  const [purgeError,setPurgeError]=useState<string|null>(null)
   const [lockedDocumentIds, setLockedDocumentIds] = useState<number[]>([])
   const [privateDocumentIds,setPrivateDocumentIds]=useState<number[]>([])
   const [guestMode,setGuestMode]=useState(false)
@@ -1329,6 +1341,26 @@ function App() {
       setFileActionError(error instanceof Error ? error.message : String(error))
     } finally {
       setIsResettingTestlab(false)
+    }
+  }
+
+  async function handlePurgeVault() {
+    if (purgePhrase !== 'RADERA ALLT') return
+    if (!window.confirm('Detta raderar permanent alla dokument, metadata, index, lokala backupper, Test Lab, plugins och inställningar i Vault. Åtgärden går inte att ångra. Fortsätta?')) return
+    setPurgeError(null)
+    setIsPurgingVault(true)
+    try {
+      const result = await invoke<PurgeVaultResult>('purge_vault', {
+        confirmationPhrase: purgePhrase,
+        credential: securityCredential,
+      })
+      window.localStorage.clear()
+      window.sessionStorage.clear()
+      window.alert(`Vault är tomt och återställt. ${result.removed_root_entries} dataposter raderades och schema v${result.schema_version} skapades på nytt.`)
+      window.location.reload()
+    } catch (error) {
+      setPurgeError(error instanceof Error ? error.message : String(error))
+      setIsPurgingVault(false)
     }
   }
 
@@ -2710,6 +2742,7 @@ function App() {
                 <div className="work-item form-stack"><strong>Gästläge</strong><span>{guestMode?'Aktivt — privata och dolda dokument visas inte':'Avstängt'}</span><p>Gästläget döljer privata dokument från listor, sökresultat och förhandsvisning utan att ändra original eller metadata.</p><button className="secondary-action" onClick={()=>{setGuestMode(value=>!value);setSelectedIndex(0);setDocumentDetail(null)}} type="button">{guestMode?'Avsluta gästläge':'Starta gästläge'}</button></div>
                 <div className="work-item form-stack"><strong>Windows-skyddad snabb upplåsning</strong><span>{quickUnlockEnabled?'Aktiverad för denna Windows-användare':'Avstängd'}</span><p>PIN/lösenordet lagras aldrig i klartext. Windows DPAPI krypterar det användarbundet och Vault verifierar fortfarande den vanliga hashningen vid upplåsning.</p><button className="secondary-action" disabled={!quickUnlockEnabled&&!securityCredential} onClick={handleToggleQuickUnlock} type="button">{quickUnlockEnabled?'Ta bort snabb upplåsning':'Aktivera efter upplåsning'}</button></div>
                 <div className="work-item"><strong>Senaste skyddade export</strong>{lastProtectedExport?<><span>{lastProtectedExport.masked?'Maskerad text':'Originalkopia'} · {(lastProtectedExport.size_bytes/1024).toFixed(1)} KB</span><small className="path-value">{lastProtectedExport.export_path}</small><code>{lastProtectedExport.sha256.slice(0,24)}…</code></>:<p>Ingen skyddad export skapad i denna session.</p>}</div>
+                <div className="work-item form-stack purge-vault-card"><strong>Radera allt och börja om</strong><p>Tar permanent bort alla dokument, metadata, index, lokala backupper, Test Lab, plugins och lokala inställningar. Externa backupkopior utanför Vaults datakatalog påverkas inte.</p>{!showPurgeVault?<button className="mini-action danger" onClick={()=>setShowPurgeVault(true)} type="button">Visa fullständig nollställning</button>:<><label>Skriv <code>RADERA ALLT</code><input autoComplete="off" value={purgePhrase} onChange={event=>setPurgePhrase(event.target.value)} /></label>{securityStatus.pin_configured?<label>PIN/lösenord<input type="password" value={securityCredential} onChange={event=>setSecurityCredential(event.target.value)}/></label>:null}<div className="claim-actions"><button className="mini-action danger" disabled={purgePhrase!=='RADERA ALLT'||isPurgingVault||(securityStatus.pin_configured&&!securityCredential)} onClick={handlePurgeVault} type="button">{isPurgingVault?'Raderar och återställer…':'Radera hela Vault permanent'}</button><button className="mini-action" disabled={isPurgingVault} onClick={()=>{setShowPurgeVault(false);setPurgePhrase('');setPurgeError(null)}} type="button">Avbryt</button></div>{purgeError?<p className="inline-error">{purgeError}</p>:null}</>}</div>
               </div>{workflowError?<p className="inline-error">{workflowError}</p>:null}
             </div>:null}
 

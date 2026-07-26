@@ -1,6 +1,6 @@
 # Vault
 
-Vault 1.1.0 är ett lokalt, privat och helt AI-fritt dokumentarkiv för Windows.
+Vault 1.2.0 är ett lokalt, privat och helt AI-fritt dokumentarkiv för Windows.
 Appen är byggd med Tauri, React, Rust, SQLite och FTS5 och fungerar utan konto,
 molntjänst eller telemetri.
 
@@ -28,6 +28,8 @@ molntjänst eller telemetri.
 - Export till JSON, CSV, `.vaultzip` och `.vaultarchive`.
 - PIN/lösenord, sessionslås, dokumentlås, gästläge, DPAPI-snabbupplåsning och
   krypterad privat sektion.
+- Säker fullständig nollställning som raderar hela det lokala arkivet och
+  omedelbart skapar en ny tom Vault.
 - SHA-256-integritetskontroll och detektering av exakta och nära dubbletter.
 - Deklarativt lokalt plugin-API med sju adaptertyper och utan nätverks-,
   process- eller AI-behörighet.
@@ -51,7 +53,7 @@ Följande ingår avsiktligt inte:
 ## Installera
 
 Öppna [GitHub Releases](https://github.com/SulimanZ-Dev/Vault/releases/latest)
-och hämta `Vault_1.1.0_x64-setup.exe`. Installern innehåller den färdiga
+och hämta `Vault_1.2.0_x64-setup.exe`. Installern innehåller den färdiga
 Windows-appen.
 
 Den fristående `vault.exe` publiceras också för den som inte vill använda
@@ -109,12 +111,13 @@ npm run tauri build
 
 ## Verifierad release
 
-Version 1.1.0 är verifierad med:
+Version 1.2.0 är verifierad med:
 
-- 35 Rust-tester,
+- 36 Rust-tester,
 - 22 UI- och tillgänglighetskontroller,
 - TypeScript/Vite-produktionsbygge,
 - faktisk start och funktionsprov i paketerad `vault.exe`,
+- fullständig nollställning verifierad i isolerad release-EXE,
 - Test Center i release-EXE: 19 godkända och 0 misslyckade.
 
 ## Licens

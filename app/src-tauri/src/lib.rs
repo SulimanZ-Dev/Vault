@@ -180,6 +180,15 @@ struct VaultInitStatus {
     testlab_document_count: i64,
 }
 
+#[derive(Serialize)]
+struct PurgeVaultResult {
+    removed_root_entries: i64,
+    schema_version: i64,
+    production_document_count: i64,
+    testlab_document_count: i64,
+    data_root: String,
+}
+
 #[derive(Clone, Serialize)]
 struct DocumentSummary {
     id: i64,
@@ -1185,6 +1194,112 @@ fn initialize_vault(app: tauri::AppHandle) -> Result<VaultInitStatus, String> {
 
     ensure_bundled_tessdata(&app, &data_root).map_err(|error| error.to_string())?;
     initialize_vault_at(&data_root).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn purge_vault(
+    app: tauri::AppHandle,
+    confirmation_phrase: String,
+    credential: String,
+) -> Result<PurgeVaultResult, String> {
+    if confirmation_phrase != "RADERA ALLT" {
+        return Err("Skriv exakt RADERA ALLT för att bekräfta nollställningen.".into());
+    }
+    let data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Kunde inte hitta Vaults appdatakatalog: {error}"))?;
+    if !matches!(
+        data_root.file_name().and_then(|name| name.to_str()),
+        Some("local.vault.desktop")
+    ) {
+        return Err("Säkerhetsstopp: oväntad appdatakatalog. Inget raderades.".into());
+    }
+    initialize_vault_at(&data_root).map_err(|error| error.to_string())?;
+    let connection =
+        Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
+    let pin_configured: bool = connection
+        .query_row(
+            "SELECT pin_hash IS NOT NULL FROM security_settings WHERE vault_id=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if pin_configured && !verify_pin(&connection, &credential).map_err(|error| error.to_string())? {
+        return Err("Rätt PIN/lösenord krävs innan hela Vault kan raderas.".into());
+    }
+    drop(connection);
+    purge_vault_at(&data_root).map_err(|error| error.to_string())
+}
+
+fn purge_vault_at(data_root: &Path) -> Result<PurgeVaultResult, String> {
+    let root_name = data_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .ok_or_else(|| "Säkerhetsstopp: ogiltig Vault-datarot.".to_string())?;
+    let parent = data_root
+        .parent()
+        .ok_or_else(|| "Säkerhetsstopp: Vault-dataroten saknar överordnad katalog.".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let removed_root_entries = if data_root.is_dir() {
+        fs::read_dir(data_root)
+            .map_err(|error| error.to_string())?
+            .count() as i64
+    } else {
+        0
+    };
+    let purge_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let staged_root = parent.join(format!("{root_name}.purge-{purge_id}"));
+    if staged_root.parent() != Some(parent)
+        || !staged_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(&format!("{root_name}.purge-")))
+    {
+        return Err(
+            "Säkerhetsstopp: den kontrollerade purge-sökvägen kunde inte verifieras.".into(),
+        );
+    }
+    if data_root.exists() {
+        fs::rename(data_root, &staged_root)
+            .map_err(|error| format!("Kunde inte låsa Vault-data för nollställning: {error}"))?;
+    }
+    match initialize_vault_at(data_root) {
+        Ok(status) => {
+            if staged_root.exists() {
+                fs::remove_dir_all(&staged_root).map_err(|error| {
+                    format!("Nytt Vault skapades men gammal data kunde inte rensas: {error}")
+                })?;
+            }
+            let connection =
+                Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
+            let production_document_count = connection
+                .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            Ok(PurgeVaultResult {
+                removed_root_entries,
+                schema_version: status.schema_version,
+                production_document_count,
+                testlab_document_count: status.testlab_document_count,
+                data_root: status.data_root,
+            })
+        }
+        Err(error) => {
+            if data_root.exists() {
+                let _ = fs::remove_dir_all(data_root);
+            }
+            if staged_root.exists() {
+                let _ = fs::rename(&staged_root, data_root);
+            }
+            Err(format!(
+                "Nollställningen avbröts och den tidigare datan återställdes: {error}"
+            ))
+        }
+    }
 }
 
 fn initialize_vault_at(data_root: &Path) -> rusqlite::Result<VaultInitStatus> {
@@ -13625,6 +13740,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             environment_status,
             initialize_vault,
+            purge_vault,
             vault_diagnostics,
             list_production_documents,
             list_trashed_production_documents,
@@ -13879,6 +13995,52 @@ mod tests {
         let report = run_test_center_at(temp_dir.path()).expect("test center");
         assert_eq!(report.failed, 0);
         assert!(report.passed >= 5);
+    }
+
+    #[test]
+    fn purges_all_vault_data_and_reinitializes_empty_production_archive() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        initialize_vault_at(temp_dir.path()).expect("vault initialization");
+        let source = temp_dir.path().join("purge-fixture.txt");
+        fs::write(&source, "Dokument som ska raderas permanent").expect("write fixture");
+        import_document_at(temp_dir.path(), &source).expect("import fixture");
+        fs::write(
+            temp_dir
+                .path()
+                .join("backups")
+                .join("old-backup-marker.txt"),
+            "old backup",
+        )
+        .expect("write backup marker");
+        fs::create_dir_all(temp_dir.path().join("plugins").join("old-plugin"))
+            .expect("plugin directory");
+        fs::write(
+            temp_dir
+                .path()
+                .join("plugins")
+                .join("old-plugin")
+                .join("manifest.json"),
+            "{}",
+        )
+        .expect("plugin marker");
+
+        let result = purge_vault_at(temp_dir.path()).expect("purge vault");
+
+        assert_eq!(result.schema_version, 32);
+        assert_eq!(result.production_document_count, 0);
+        assert_eq!(result.testlab_document_count, 57);
+        assert!(result.removed_root_entries > 0);
+        assert!(!temp_dir
+            .path()
+            .join("backups")
+            .join("old-backup-marker.txt")
+            .exists());
+        assert!(!temp_dir.path().join("plugins").join("old-plugin").exists());
+        assert!(temp_dir.path().join("vault.db").exists());
+        assert!(temp_dir.path().join("files").is_dir());
+        assert!(list_production_documents_at(temp_dir.path())
+            .expect("empty production archive")
+            .is_empty());
     }
 
     #[test]

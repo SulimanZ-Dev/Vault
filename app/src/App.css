@@ -258,6 +258,21 @@
   color: var(--danger);
 }
 
+.purge-vault-card {
+  border-color: color-mix(in srgb, #ef4444 62%, var(--border-color));
+  background: color-mix(in srgb, #7f1d1d 14%, var(--surface-raised));
+}
+
+.mini-action.danger {
+  border-color: #ef4444;
+  color: #fecaca;
+}
+
+.mini-action.danger:disabled {
+  border-color: var(--border-color);
+  color: var(--text-secondary);
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.72;

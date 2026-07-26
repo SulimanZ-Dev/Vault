@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{thread, time::Duration};
 use tauri::Manager;
@@ -1020,6 +1020,9 @@ struct TestLabScaleResult {
     elapsed_ms: u128,
     search_elapsed_ms: u128,
     database_bytes: u64,
+    import_budget_ms: u128,
+    search_budget_ms: u128,
+    budgets_met: bool,
 }
 #[derive(Serialize)]
 struct TestReportExport {
@@ -3170,6 +3173,126 @@ fn unlock_vault(app: tauri::AppHandle, pin: String) -> Result<bool, String> {
     let success = verify_pin(&connection, &pin).map_err(|e| e.to_string())?;
     connection.execute("INSERT INTO security_events(event_type,success,safe_summary) VALUES('unlock_attempt',?1,?2)",params![i64::from(success),if success{"Vault unlock succeeded"}else{"Vault unlock failed"}]).map_err(|e|e.to_string())?;
     Ok(success)
+}
+
+#[cfg(windows)]
+fn run_dpapi_script(script: &str, input: &str) -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+    let mut child = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(0x08000000)
+        .spawn()
+        .map_err(|_| "Windows DPAPI kunde inte startas".to_string())?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or("DPAPI-indata saknas")?
+        .write_all(input.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("Windows DPAPI avvisade operationen".into());
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_string())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+fn protect_unlock_secret(pin: &str) -> Result<Vec<u8>, String> {
+    let input = base64::engine::general_purpose::STANDARD.encode(pin.as_bytes());
+    let script = "Add-Type -AssemblyName System.Security;$b=[Convert]::FromBase64String(([Console]::In.ReadToEnd()).Trim());$p=[Security.Cryptography.ProtectedData]::Protect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Convert]::ToBase64String($p)";
+    let protected = run_dpapi_script(script, &input)?;
+    base64::engine::general_purpose::STANDARD
+        .decode(protected)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+fn unprotect_unlock_secret(bytes: &[u8]) -> Result<String, String> {
+    let input = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let script = "Add-Type -AssemblyName System.Security;$b=[Convert]::FromBase64String(([Console]::In.ReadToEnd()).Trim());$p=[Security.Cryptography.ProtectedData]::Unprotect($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Convert]::ToBase64String($p)";
+    let clear = run_dpapi_script(script, &input)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(clear)
+        .map_err(|e| e.to_string())?;
+    String::from_utf8(bytes).map_err(|_| "DPAPI-hemligheten är skadad".into())
+}
+
+#[tauri::command]
+fn set_quick_unlock(app: tauri::AppHandle, pin: String, enabled: bool) -> Result<bool, String> {
+    let data_root = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let credential_path = data_root.join("credentials").join("unlock.dpapi");
+    if !enabled {
+        if credential_path.exists() {
+            fs::remove_file(&credential_path).map_err(|e| e.to_string())?;
+        }
+        return Ok(false);
+    }
+    let connection = production_connection(&app)?;
+    if !verify_pin(&connection, &pin).map_err(|e| e.to_string())? {
+        return Err("Rätt PIN/lösenord krävs för att aktivera snabb upplåsning".into());
+    }
+    #[cfg(windows)]
+    {
+        let protected = protect_unlock_secret(&pin)?;
+        fs::create_dir_all(
+            credential_path
+                .parent()
+                .ok_or("Ogiltig credential-sökväg")?,
+        )
+        .map_err(|e| e.to_string())?;
+        fs::write(&credential_path, protected).map_err(|e| e.to_string())?;
+        record_audit_event(
+            &connection,
+            "quick_unlock_enabled",
+            "vault",
+            Some(1),
+            "DPAPI quick unlock enabled for current Windows user",
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = credential_path;
+        Err("DPAPI-upplåsning stöds endast i Windows-versionen".into())
+    }
+}
+
+#[tauri::command]
+fn quick_unlock_status(app: tauri::AppHandle) -> Result<bool, String> {
+    let data_root = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(data_root.join("credentials").join("unlock.dpapi").is_file())
+}
+
+#[tauri::command]
+fn unlock_vault_quick(app: tauri::AppHandle) -> Result<bool, String> {
+    let data_root = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let bytes = fs::read(data_root.join("credentials").join("unlock.dpapi"))
+        .map_err(|_| "Snabb upplåsning är inte aktiverad".to_string())?;
+    #[cfg(windows)]
+    {
+        let pin = unprotect_unlock_secret(&bytes)?;
+        let connection = production_connection(&app)?;
+        let success = verify_pin(&connection, &pin).map_err(|e| e.to_string())?;
+        connection.execute("INSERT INTO security_events(event_type,success,safe_summary) VALUES('dpapi_unlock',?1,?2)",params![i64::from(success),if success{"DPAPI quick unlock succeeded"}else{"DPAPI quick unlock failed; credential must be replaced"}]).map_err(|e|e.to_string())?;
+        Ok(success)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = bytes;
+        Err("DPAPI-upplåsning stöds endast i Windows-versionen".into())
+    }
 }
 
 #[cfg(windows)]
@@ -5387,6 +5510,21 @@ fn generate_testlab_scale_at(data_root: &Path, count: i64) -> rusqlite::Result<T
         elapsed_ms,
         search_elapsed_ms,
         database_bytes,
+        import_budget_ms: match count {
+            100 => 1_000,
+            1_000 => 3_000,
+            10_000 => 15_000,
+            _ => 60_000,
+        },
+        search_budget_ms: 500,
+        budgets_met: elapsed_ms
+            <= match count {
+                100 => 1_000,
+                1_000 => 3_000,
+                10_000 => 15_000,
+                _ => 60_000,
+            }
+            && search_elapsed_ms <= 500,
     })
 }
 
@@ -5425,32 +5563,87 @@ fn simulate_testlab_failure(
 ) -> Result<TestCenterCase, String> {
     let root = app.path().app_data_dir().map_err(|e| e.to_string())?;
     initialize_vault_at(&root).map_err(|e| e.to_string())?;
-    let (expected, actual) = match failure_type.as_str() {
-        "ocr" => (
-            "OCR-fel fångas utan att produktion ändras",
-            "Simulerat OCR_TOOL_UNAVAILABLE registrerat endast i Test Lab",
-        ),
-        "database" => (
-            "Databasfel rullas tillbaka",
-            "Simulerad transaktion återställd; produktionsdatabas orörd",
-        ),
-        "file" => (
-            "Saknad fil rapporteras",
-            "Simulerad FILE_NOT_FOUND gav kontrollerat fel",
-        ),
-        "interrupt" => (
-            "Avbrott kan återupptas",
-            "Simulerat jobb pausades vid 2/5 och behöll progress",
-        ),
-        "restore" => (
-            "Återställning verifieras innan byte",
-            "Simulerad backup validerades och ingen produktionsfil ersattes",
-        ),
+    let test_db = root.join("testlab").join("vault-test.db");
+    let (expected, actual, passed) = match failure_type.as_str() {
+        "ocr" => {
+            let failed = Command::new("vault-deliberately-missing-ocr-tool.exe")
+                .output()
+                .is_err();
+            (
+                "OCR-fel fångas utan att produktion ändras",
+                "Ett verkligt saknat OCR-program gav ett kontrollerat IO-fel",
+                failed,
+            )
+        }
+        "database" => {
+            let before = Connection::open(&test_db)
+                .and_then(|c| {
+                    c.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get::<_, i64>(0))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut c = Connection::open(&test_db).map_err(|e| e.to_string())?;
+            let tx = c.transaction().map_err(|e| e.to_string())?;
+            tx.execute("INSERT INTO documents(vault_id,title,document_type,inbox_status,source_label,match_explanation,extracted_text) VALUES(1,'ROLLBACK TEST','Test','review','TEST LAB','Rollback','')", []).map_err(|e| e.to_string())?;
+            tx.rollback().map_err(|e| e.to_string())?;
+            let after = c
+                .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())?;
+            (
+                "Databasfel rullas tillbaka",
+                "En verklig Test Lab-transaktion återställdes utan kvarvarande rad",
+                before == after,
+            )
+        }
+        "file" => {
+            let missing = root.join("testlab").join("definitely-missing.fixture");
+            (
+                "Saknad fil rapporteras",
+                "En verklig saknad Test Lab-fil gav NotFound utan krasch",
+                fs::read(missing).is_err(),
+            )
+        }
+        "interrupt" => {
+            let c = Connection::open(&test_db).map_err(|e| e.to_string())?;
+            c.execute("INSERT INTO jobs(vault_id,job_type,target_type,status,progress_current,progress_total,pause_requested,payload_json,checkpoint_json) VALUES(1,'test_interrupt','vault','running',2,5,0,'{}','{\"step\":2}')", []).map_err(|e| e.to_string())?;
+            let id = c.last_insert_rowid();
+            c.execute(
+                "UPDATE jobs SET pause_requested=1,status='paused' WHERE id=?1",
+                [id],
+            )
+            .map_err(|e| e.to_string())?;
+            let state: (String, i64, i64) = c
+                .query_row(
+                    "SELECT status,progress_current,progress_total FROM jobs WHERE id=?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            c.execute("DELETE FROM jobs WHERE id=?1", [id])
+                .map_err(|e| e.to_string())?;
+            (
+                "Avbrott kan återupptas",
+                "Ett verkligt Test Lab-jobb pausades vid 2/5 med checkpoint bevarad",
+                state == ("paused".into(), 2, 5),
+            )
+        }
+        "restore" => {
+            let probe = root.join("testlab").join("restore-probe.db");
+            fs::copy(&test_db, &probe).map_err(|e| e.to_string())?;
+            let integrity: String = Connection::open(&probe)
+                .and_then(|c| c.query_row("PRAGMA integrity_check", [], |r| r.get(0)))
+                .map_err(|e| e.to_string())?;
+            let _ = fs::remove_file(&probe);
+            (
+                "Återställning verifieras innan byte",
+                "En verklig isolerad databaskopia öppnades och klarade SQLite integrity_check",
+                integrity == "ok",
+            )
+        }
         _ => return Err("Okänd felsimulering".into()),
     };
     Ok(TestCenterCase {
         name: format!("Simulering: {failure_type}"),
-        status: "passed".into(),
+        status: if passed { "passed" } else { "failed" }.into(),
         expected: expected.into(),
         actual: actual.into(),
     })
@@ -12492,6 +12685,9 @@ pub fn run() {
             security_status,
             configure_security,
             unlock_vault,
+            set_quick_unlock,
+            quick_unlock_status,
+            unlock_vault_quick,
             windows_hello_status,
             unlock_vault_windows_hello,
             set_document_security,
@@ -13707,4 +13903,18 @@ fn deterministic_near_duplicate_fingerprints_detect_small_changes() {
         ^ perceptual_image_hash(&second_path).expect("hash"))
     .count_ones();
     assert!(distance <= 2);
+}
+
+#[cfg(windows)]
+#[test]
+fn dpapi_roundtrip_is_user_bound_and_not_plaintext() {
+    let secret = "vault-test-secret-4279";
+    let protected = protect_unlock_secret(secret).expect("protect with current Windows user");
+    assert!(!protected
+        .windows(secret.len())
+        .any(|window| window == secret.as_bytes()));
+    assert_eq!(
+        unprotect_unlock_secret(&protected).expect("unprotect"),
+        secret
+    );
 }

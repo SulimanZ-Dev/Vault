@@ -1398,6 +1398,395 @@ fn seed_testlab_documents(connection: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    let extended_fixtures = [
+        (
+            14,
+            "Nationellt ID – syntetiskt",
+            "Identitetshandling",
+            "2023-01-12",
+            "nationellt id kontrollsiffra TEST-ID-001",
+        ),
+        (
+            15,
+            "Körkort – syntetiskt",
+            "Körkort",
+            "2021-05-03",
+            "körkort behörighet B TEST-KK-001",
+        ),
+        (
+            16,
+            "Äldre pass 2017",
+            "Identitetshandling",
+            "2017-04-10",
+            "pass historiskt utgånget TEST-PASS-OLD",
+        ),
+        (
+            17,
+            "Nyare pass 2025",
+            "Identitetshandling",
+            "2025-03-18",
+            "pass giltigt aktuellt TEST-PASS-NEW",
+        ),
+        (
+            18,
+            "Dubblettbild av nyare pass",
+            "Identitetshandling",
+            "2025-03-18",
+            "pass dubblettbild TEST-PASS-NEW",
+        ),
+        (
+            19,
+            "Makulerat pass",
+            "Identitetshandling",
+            "2026-01-09",
+            "pass makulerat ska inte vara aktuellt TEST-PASS-CANCELLED",
+        ),
+        (
+            20,
+            "Anställningsavtal Nordlager",
+            "Anställningsavtal",
+            "2023-08-01",
+            "parallell anställning arbetsgivare Nordlager AB utan slutdatum",
+        ),
+        (
+            21,
+            "Ändringsavtal DAGAB",
+            "Tilläggsavtal",
+            "2024-09-01",
+            "ändringsavtal ny arbetstid från 2024-09-01",
+        ),
+        (
+            22,
+            "Tilläggsavtal timlön",
+            "Tilläggsavtal",
+            "2025-01-01",
+            "avtalad timlön 198 SEK från 2025-01-01 tidigare 184 SEK historisk",
+        ),
+        (
+            23,
+            "Lönespecifikation maj",
+            "Lönespecifikation",
+            "2024-05-25",
+            "löneperiod maj arbetsgivare DAGAB faktiskt utbetald lön",
+        ),
+        (
+            24,
+            "Lönespecifikation juli",
+            "Lönespecifikation",
+            "2024-07-25",
+            "löneperiod juli arbetsgivare DAGAB faktiskt utbetald lön",
+        ),
+        (
+            25,
+            "Arbetsgivarintyg",
+            "Arbetsgivarintyg",
+            "2025-02-14",
+            "arbetsgivarintyg DAGAB sysselsättningsgrad 100 procent",
+        ),
+        (
+            26,
+            "Sjukfrånvarorutin",
+            "Arbetsplatsrutin",
+            "2024-02-20",
+            "dokumenterad rutin för sjukanmälan ingen juridisk tolkning",
+        ),
+        (
+            27,
+            "CV – syntetisk person",
+            "CV",
+            "2025-01-15",
+            "meritförteckning syntetisk person",
+        ),
+        (
+            28,
+            "Personligt brev",
+            "Personligt brev",
+            "2025-01-16",
+            "ansökningsbrev syntetisk testdata",
+        ),
+        (
+            29,
+            "Examensbevis",
+            "Examensbevis",
+            "2022-06-10",
+            "examen testuniversitet utbildning avslutad",
+        ),
+        (
+            30,
+            "Betygsutdrag",
+            "Betyg",
+            "2022-06-11",
+            "betyg kurser helt syntetiska",
+        ),
+        (
+            31,
+            "Kursintyg",
+            "Utbildningsintyg",
+            "2023-11-08",
+            "kursintyg säker lagerhantering",
+        ),
+        (
+            32,
+            "Antagningsbesked utbildning A",
+            "Antagningsbesked",
+            "2025-04-02",
+            "parallell utbildning A start 2025-08-20",
+        ),
+        (
+            33,
+            "CSN-beslut",
+            "Myndighetsbeslut",
+            "2025-04-12",
+            "CSN beslut studieperiod uttryckliga belopp",
+        ),
+        (
+            34,
+            "Antagningsbesked utbildning B",
+            "Antagningsbesked",
+            "2025-04-04",
+            "parallell utbildning B start 2025-09-01",
+        ),
+        (
+            35,
+            "Fordonsbevis ABC123",
+            "Fordonsdokument",
+            "2021-03-05",
+            "registreringsnummer ABC123 VIN YV1TS592081234567",
+        ),
+        (
+            36,
+            "Besiktningsprotokoll ABC123",
+            "Besiktningsprotokoll",
+            "2025-03-05",
+            "mätarställning 84210 km godkänd besiktning",
+        ),
+        (
+            37,
+            "Servicekvitto ABC123",
+            "Bilservice",
+            "2025-04-14",
+            "verkstad Testverkstad AB regnummer ABC123 mätarställning 85100 km belopp 4295 SEK",
+        ),
+        (
+            38,
+            "Fordonsförsäkring",
+            "Försäkring",
+            "2025-01-01",
+            "försäkring ABC123 giltig 2025-01-01 till 2025-12-31",
+        ),
+        (
+            39,
+            "Däckkvitto",
+            "Kvitto",
+            "2024-10-20",
+            "vinterdäck ABC123 belopp 6995 SEK",
+        ),
+        (
+            40,
+            "Kamremsbyte",
+            "Bilservice",
+            "2024-06-18",
+            "kamrem bytt ABC123 mätarställning 79000 km",
+        ),
+        (
+            41,
+            "Motstridig mätarställning",
+            "Besiktningsprotokoll",
+            "2025-05-01",
+            "mätarställning 81000 km konflikt med senare 85100 km",
+        ),
+        (
+            42,
+            "Bostadsavtal",
+            "Bostadsavtal",
+            "2024-01-01",
+            "hyresavtal testadress giltigt från 2024-01-01",
+        ),
+        (
+            43,
+            "Hyresfaktura",
+            "Faktura",
+            "2025-06-01",
+            "faktura juni belopp 8500 SEK",
+        ),
+        (
+            44,
+            "Betalningsbekräftelse",
+            "Betalningsbekräftelse",
+            "2025-06-03",
+            "betalning faktura testreferens genomförd",
+        ),
+        (
+            45,
+            "Abonnemangsavtal",
+            "Avtal",
+            "2024-09-01",
+            "abonnemang TEST-AB-01 bindningstid 24 månader",
+        ),
+        (
+            46,
+            "Myndighetsbrev",
+            "Myndighetsbrev",
+            "2025-02-01",
+            "sista svarsdatum 2025-03-01 uttrycklig källa",
+        ),
+        (
+            47,
+            "Produktkvitto laptop",
+            "Kvitto",
+            "2024-08-12",
+            "produkt TestLaptop serienummer TEST-SN-8842 belopp 12990 SEK",
+        ),
+        (
+            48,
+            "Produktgaranti laptop",
+            "Garanti",
+            "2024-08-12",
+            "garantiperiod 24 månader beräknat slut 2026-08-12",
+        ),
+        (
+            49,
+            "Resebokning",
+            "Bokningsbekräftelse",
+            "2025-07-01",
+            "bokningsnummer TEST-BOOK-01 resa 2025-09-10",
+        ),
+        (
+            50,
+            "Flygbiljett",
+            "Flygbiljett",
+            "2025-09-10",
+            "flyg TEST123 avgång 08:30 helt syntetisk",
+        ),
+        (
+            51,
+            "Låg OCR-kvalitet",
+            "Skannat dokument",
+            "2020-01-01",
+            "0CR f3l osaker text kvalltet lag",
+        ),
+        (
+            52,
+            "Roterad skanningssida",
+            "Skannat dokument",
+            "2020-02-02",
+            "roterad sida 90 grader OCR test",
+        ),
+        (
+            53,
+            "Handskriven bilaga",
+            "Bilaga",
+            "2020-03-03",
+            "handskriven del kan inte säkert extraheras",
+        ),
+        (
+            54,
+            "Flerspråkigt intyg",
+            "Utbildningsintyg",
+            "2022-05-05",
+            "svenska english deutsch test document",
+        ),
+        (
+            55,
+            "Dokument utan metadata",
+            "Okänd",
+            "2020-01-01",
+            "saknad metadata kräver granskning",
+        ),
+        (
+            56,
+            "Exakt dubblett A",
+            "Kvitto",
+            "2024-04-04",
+            "EXACT-DUPLICATE-CONTENT TEST 400 SEK",
+        ),
+        (
+            57,
+            "Exakt dubblett B",
+            "Kvitto",
+            "2024-04-04",
+            "EXACT-DUPLICATE-CONTENT TEST 400 SEK",
+        ),
+        (
+            58,
+            "Nästan identiskt avtal A",
+            "Avtal",
+            "2024-05-01",
+            "nästan identiskt avtal version ett villkor A",
+        ),
+        (
+            59,
+            "Nästan identiskt avtal B",
+            "Avtal",
+            "2024-05-02",
+            "nästan identiskt avtal version två villkor B",
+        ),
+        (
+            60,
+            "Trasig fil – kontrollerat test",
+            "Feltest",
+            "2020-01-01",
+            "TRASIG FIL endast Test Lab för kontrollerad felhantering",
+        ),
+        (
+            61,
+            "Otillgänglig fil – kontrollerat test",
+            "Feltest",
+            "2020-01-01",
+            "OTILLGÄNGLIG FIL endast Test Lab",
+        ),
+        (
+            62,
+            "Känsligt testdokument",
+            "Privat",
+            "2020-01-01",
+            "TEST-PERSONNUMMER 19900101-TEST ska maskeras",
+        ),
+        (
+            63,
+            "Framtida avtalsperiod",
+            "Avtal",
+            "2030-01-01",
+            "avtal gäller 2030-01-01 till 2031-01-01 framtida",
+        ),
+        (
+            64,
+            "Utgånget avtal",
+            "Avtal",
+            "2019-01-01",
+            "avtal giltigt 2019-01-01 till 2020-01-01 historiskt",
+        ),
+        (
+            65,
+            "Oklassificerbart dokument",
+            "Okänd",
+            "2020-01-01",
+            "slumpmässig lokal text utan säker dokumenttyp",
+        ),
+        (
+            66,
+            "Parallell fordonsförsäkring",
+            "Försäkring",
+            "2025-04-01",
+            "andra försäkring ABC123 parallellt giltig",
+        ),
+    ];
+    for (id, title, document_type, document_date, body_text) in extended_fixtures {
+        connection.execute(
+            "INSERT INTO documents(id,vault_id,title,document_type,document_date,inbox_status,source_label,match_explanation,extracted_text)
+             VALUES(?1,1,?2,?3,?4,'review','GENERERAD TESTDATA','Fullständig deterministisk Test Lab-fixture',?5)
+             ON CONFLICT(id) DO UPDATE SET title=excluded.title,document_type=excluded.document_type,document_date=excluded.document_date,inbox_status=excluded.inbox_status,source_label=excluded.source_label,match_explanation=excluded.match_explanation,extracted_text=excluded.extracted_text",
+            params![id,title,document_type,document_date,body_text],
+        )?;
+        index_document(
+            connection,
+            id,
+            title,
+            &format!("{document_type} {document_date} GENERERAD TESTDATA"),
+            body_text,
+        )?;
+    }
+
     Ok(())
 }
 
@@ -5419,15 +5808,78 @@ fn run_test_center_at(data_root: &Path) -> rusqlite::Result<TestCenterReport> {
     push_test_case(
         &mut cases,
         "Test Lab fixture count",
-        "At least 4 core fixtures; scale fixtures are allowed",
+        "At least 57 domain and failure fixtures; scale fixtures are allowed",
         &format!(
             "{} synthetic documents including scale fixtures",
             testlab_documents.len()
         ),
-        testlab_documents.len() >= 4
+        testlab_documents.len() >= 57
             && [10_i64, 11, 12, 13]
                 .iter()
                 .all(|id| testlab_documents.iter().any(|document| document.id == *id)),
+    );
+
+    let passport_count = testlab_documents
+        .iter()
+        .filter(|document| document.title.to_lowercase().contains("pass"))
+        .count();
+    push_test_case(
+        &mut cases,
+        "Scenario: fyra passdokument",
+        "Minst fyra historiska, aktuella, duplicerade eller makulerade passfixtures",
+        &format!("{passport_count} passfixtures"),
+        passport_count >= 4,
+    );
+    let parallel_employments = testlab_documents
+        .iter()
+        .filter(|document| document.document_type == "Anställningsavtal")
+        .count();
+    push_test_case(
+        &mut cases,
+        "Scenario: parallella anställningar",
+        "Minst två anställningsavtal utan automatisk överskrivning",
+        &format!("{parallel_employments} anställningsavtal"),
+        parallel_employments >= 2,
+    );
+    let wage_contracts = search_testlab_documents_at(data_root, "timlön tilläggsavtal")?;
+    push_test_case(
+        &mut cases,
+        "Scenario: ändrad timlön",
+        "Tilläggsavtal rankas och historisk timlön bevaras",
+        wage_contracts
+            .first()
+            .map(|result| result.document.title.as_str())
+            .unwrap_or("ingen träff"),
+        wage_contracts
+            .first()
+            .is_some_and(|result| result.document.title.contains("timlön")),
+    );
+    let vehicle_results = search_testlab_documents_at(data_root, "ABC123")?;
+    push_test_case(
+        &mut cases,
+        "Scenario: fordon och motstridigt miltal",
+        "Service, besiktning och konfliktfixture hittas för samma registreringsnummer",
+        &format!("{} relaterade sökträffar", vehicle_results.len()),
+        vehicle_results.len() >= 3,
+    );
+    let warranty_results = search_testlab_documents_at(data_root, "laptop")?;
+    push_test_case(
+        &mut cases,
+        "Scenario: produktgaranti",
+        "Kvitto och garanti är sökbara via produktens serienummer",
+        &format!("{} garanti-/produktträffar", warranty_results.len()),
+        warranty_results.len() >= 2,
+    );
+    let failure_count = testlab_documents
+        .iter()
+        .filter(|document| document.document_type == "Feltest")
+        .count();
+    push_test_case(
+        &mut cases,
+        "Scenario: kontrollerade filfel",
+        "Trasig och otillgänglig fil representeras bara i Test Lab",
+        &format!("{failure_count} isolerade felfixtures"),
+        failure_count == 2,
     );
 
     let dagab_results = search_testlab_documents_at(data_root, "DAGAB kontrakt")?;
@@ -12943,7 +13395,7 @@ mod tests {
         let status = initialize_vault_at(temp_dir.path()).expect("vault initialization");
 
         assert_eq!(status.schema_version, 31);
-        assert_eq!(status.testlab_document_count, 4);
+        assert_eq!(status.testlab_document_count, 57);
         assert!(status.production_vault_ready);
         assert!(PathBuf::from(status.database_path).exists());
         assert!(PathBuf::from(status.testlab_database_path).exists());
@@ -12967,7 +13419,7 @@ mod tests {
         assert_eq!(active_theme_count, 1);
 
         let documents = list_testlab_documents_at(temp_dir.path()).expect("test lab documents");
-        assert_eq!(documents.len(), 4);
+        assert_eq!(documents.len(), 57);
         assert!(documents
             .iter()
             .any(|document| document.title == "DAGAB anställningsavtal"));
@@ -12985,11 +13437,11 @@ mod tests {
             list_testlab_documents_at(temp_dir.path())
                 .expect("mutated test lab documents")
                 .len(),
-            3
+            56
         );
 
         let reset_documents = reset_testlab_at(temp_dir.path()).expect("reset test lab");
-        assert_eq!(reset_documents.len(), 4);
+        assert_eq!(reset_documents.len(), 57);
         assert!(reset_documents
             .iter()
             .any(|document| document.title.contains("DAGAB")));
@@ -13391,7 +13843,7 @@ mod tests {
             diagnostics.production_document_count,
             result.results.len() as i64
         );
-        assert_eq!(diagnostics.testlab_document_count, 4);
+        assert_eq!(diagnostics.testlab_document_count, 57);
         assert!(diagnostics.office_text_available);
 
         let salary_results =
@@ -13625,7 +14077,7 @@ fn testlab_scale_remains_isolated_and_test_center_compatible() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     initialize_vault_at(temp_dir.path()).expect("initialize");
     let scaled = generate_testlab_scale_at(temp_dir.path(), 100).expect("scale generation");
-    assert_eq!(scaled.total_documents, 104);
+    assert_eq!(scaled.total_documents, 157);
     let production = Connection::open(temp_dir.path().join("vault.db")).expect("production");
     assert_eq!(
         production

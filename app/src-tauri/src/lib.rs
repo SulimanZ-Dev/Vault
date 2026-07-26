@@ -50,6 +50,8 @@ const JOBS_RULES_BATCH_MIGRATION: &str = include_str!("../migrations/0029_jobs_r
 const PLUGIN_ADAPTERS_IMPORTERS_MIGRATION: &str =
     include_str!("../migrations/0030_plugin_adapters_importers.sql");
 const ADVANCED_THEMES_MIGRATION: &str = include_str!("../migrations/0031_advanced_themes.sql");
+const NOTIFICATIONS_PAYROLL_ADAPTERS_MIGRATION: &str =
+    include_str!("../migrations/0032_notifications_payroll_adapters.sql");
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (1, "initial local vault schema", INITIAL_MIGRATION),
     (
@@ -150,6 +152,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         PLUGIN_ADAPTERS_IMPORTERS_MIGRATION,
     ),
     (31, "advanced theme profiles", ADVANCED_THEMES_MIGRATION),
+    (
+        32,
+        "local notifications, payroll history and adapter artifacts",
+        NOTIFICATIONS_PAYROLL_ADAPTERS_MIGRATION,
+    ),
 ];
 
 #[derive(Serialize)]
@@ -950,6 +957,19 @@ struct PluginRunResult {
     scanned_documents: i64,
     changed_documents: i64,
     explanation: String,
+}
+
+#[derive(Serialize)]
+struct LocalNotification {
+    id: i64,
+    severity: String,
+    category: String,
+    title: String,
+    body: String,
+    document_id: Option<i64>,
+    due_date: Option<String>,
+    read_at: Option<String>,
+    created_at: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2722,6 +2742,34 @@ fn rebuild_deep_domain_models(connection: &Connection) -> rusqlite::Result<()> {
                     }
                 }
             }
+            "employment" if record_type == "salary_period" => {
+                let employer = domain_field(&fields_json, "employer");
+                let employment_id = if let Some(employer_name) = employer {
+                    connection
+                        .query_row(
+                            "SELECT id FROM employment_records WHERE lower(employer_name)=lower(?1) ORDER BY start_date DESC LIMIT 1",
+                            [employer_name],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()?
+                } else {
+                    None
+                };
+                connection.execute(
+                    "INSERT INTO payroll_records(employment_record_id,document_id,period_label,payment_date,gross_amount,net_amount,fields_json)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7)
+                     ON CONFLICT(document_id) DO UPDATE SET employment_record_id=excluded.employment_record_id,period_label=excluded.period_label,payment_date=excluded.payment_date,gross_amount=excluded.gross_amount,net_amount=excluded.net_amount,fields_json=excluded.fields_json",
+                    params![
+                        employment_id,
+                        document_id,
+                        domain_field(&fields_json, "salary_period"),
+                        domain_field(&fields_json, "payment_date").or(effective_from),
+                        numeric_domain_value(domain_field(&fields_json, "gross_salary")),
+                        numeric_domain_value(domain_field(&fields_json, "net_salary")),
+                        fields_json
+                    ],
+                )?;
+            }
             "product" => {
                 if let Some(product) = domain_field(&fields_json, "product_name") {
                     let warranty_days =
@@ -2820,6 +2868,10 @@ fn extract_domain_fields(domain_type: &str, text: &str) -> serde_json::Value {
             ("hourly_salary", "timlon"),
             ("hourly_salary", "avtalad timlon"),
             ("supplementary_agreement", "tillaggsavtal"),
+            ("salary_period", "loneperiod"),
+            ("payment_date", "utbetalning"),
+            ("gross_salary", "bruttolon"),
+            ("net_salary", "nettolon"),
         ],
         "product" => &[
             ("product_name", "produkt"),
@@ -4325,6 +4377,7 @@ fn validate_plugin_manifest(manifest: &PluginManifest) -> Result<(), String> {
         "read_text",
         "write_tags",
         "write_document_type",
+        "write_adapter_artifacts",
     ];
     if let Some(cap) = manifest
         .capabilities
@@ -4344,7 +4397,8 @@ fn validate_plugin_manifest(manifest: &PluginManifest) -> Result<(), String> {
         return Err(format!("Otillåten dataåtkomst: {access}"));
     }
     for action in &manifest.actions {
-        if !["add_tag", "set_document_type"].contains(&action.action_type.as_str())
+        if !["add_tag", "set_document_type", "emit_adapter_artifact"]
+            .contains(&action.action_type.as_str())
             || action.match_text.trim().is_empty()
             || action.value.trim().is_empty()
         {
@@ -4387,6 +4441,123 @@ fn read_plugin_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginSummar
         signature_status: row.get(13)?,
         resource_limit: row.get(14)?,
     })
+}
+
+fn refresh_local_notifications(connection: &Connection) -> rusqlite::Result<()> {
+    let review_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM documents WHERE vault_id=1 AND trashed_at IS NULL AND review_status IN ('needs_review','blocked')",
+        [],
+        |row| row.get(0),
+    )?;
+    if review_count > 0 {
+        connection.execute(
+            "INSERT INTO local_notifications(notification_key,severity,category,title,body)
+             VALUES('review_queue','warning','review','Dokument behöver granskas',?1)
+             ON CONFLICT(notification_key) DO UPDATE SET severity=excluded.severity,title=excluded.title,body=excluded.body,updated_at=CURRENT_TIMESTAMP",
+            [format!("{review_count} dokument väntar i granskningskön.")],
+        )?;
+    } else {
+        connection.execute(
+            "UPDATE local_notifications SET dismissed_at=COALESCE(dismissed_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE notification_key='review_queue'",
+            [],
+        )?;
+    }
+    connection.execute(
+        "INSERT INTO local_notifications(notification_key,severity,category,title,body,document_id,due_date)
+         SELECT 'expiry:'||dr.id,
+                CASE WHEN dr.effective_to < date('now','localtime','+30 day') THEN 'urgent' ELSE 'warning' END,
+                'expiry',
+                'Giltighet löper snart ut',
+                dr.subject||' har slutdatum '||dr.effective_to||'.',
+                dr.document_id,
+                dr.effective_to
+         FROM domain_records dr
+         WHERE dr.effective_to BETWEEN date('now','localtime') AND date('now','localtime','+90 day')
+         ON CONFLICT(notification_key) DO UPDATE SET severity=excluded.severity,title=excluded.title,body=excluded.body,document_id=excluded.document_id,due_date=excluded.due_date,updated_at=CURRENT_TIMESTAMP",
+        [],
+    )?;
+    let failed_jobs: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE state='failed'",
+        [],
+        |row| row.get(0),
+    )?;
+    if failed_jobs > 0 {
+        connection.execute(
+            "INSERT INTO local_notifications(notification_key,severity,category,title,body)
+             VALUES('failed_jobs','urgent','system','Bakgrundsjobb misslyckades',?1)
+             ON CONFLICT(notification_key) DO UPDATE SET body=excluded.body,updated_at=CURRENT_TIMESTAMP",
+            [format!("{failed_jobs} jobb behöver åtgärdas eller köras om.")],
+        )?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn list_local_notifications(app: tauri::AppHandle) -> Result<Vec<LocalNotification>, String> {
+    let data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let connection =
+        Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
+    refresh_local_notifications(&connection).map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id,severity,category,title,body,document_id,due_date,read_at,created_at
+             FROM local_notifications WHERE dismissed_at IS NULL
+             ORDER BY CASE severity WHEN 'urgent' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                      COALESCE(due_date,'9999-12-31'),created_at DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let notifications = statement
+        .query_map([], |row| {
+            Ok(LocalNotification {
+                id: row.get(0)?,
+                severity: row.get(1)?,
+                category: row.get(2)?,
+                title: row.get(3)?,
+                body: row.get(4)?,
+                document_id: row.get(5)?,
+                due_date: row.get(6)?,
+                read_at: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| error.to_string())?;
+    Ok(notifications)
+}
+
+#[tauri::command]
+fn update_local_notification(
+    app: tauri::AppHandle,
+    id: i64,
+    dismiss: bool,
+) -> Result<Vec<LocalNotification>, String> {
+    let data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let connection =
+        Connection::open(data_root.join("vault.db")).map_err(|error| error.to_string())?;
+    if dismiss {
+        connection
+            .execute(
+                "UPDATE local_notifications SET read_at=COALESCE(read_at,CURRENT_TIMESTAMP),dismissed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                [id],
+            )
+            .map_err(|error| error.to_string())?;
+    } else {
+        connection
+            .execute(
+                "UPDATE local_notifications SET read_at=COALESCE(read_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                [id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    drop(connection);
+    list_local_notifications(app)
 }
 
 #[tauri::command]
@@ -4527,6 +4698,22 @@ fn run_plugin(app: tauri::AppHandle, id: String) -> Result<PluginRunResult, Stri
         .map_err(|e| e.to_string())?;
     drop(statement);
     let mut changed = 0;
+    for action in manifest
+        .actions
+        .iter()
+        .filter(|action| action.action_type == "emit_adapter_artifact")
+    {
+        let value_json = serde_json::from_str::<serde_json::Value>(&action.value)
+            .unwrap_or_else(|_| serde_json::json!({"value":action.value}))
+            .to_string();
+        connection.execute(
+            "INSERT INTO plugin_adapter_artifacts(plugin_id,adapter_kind,artifact_key,label,value_json)
+             VALUES(?1,?2,?3,?3,?4)
+             ON CONFLICT(plugin_id,adapter_kind,artifact_key) DO UPDATE SET label=excluded.label,value_json=excluded.value_json,updated_at=CURRENT_TIMESTAMP",
+            params![id,manifest.adapter_kind,action.match_text,value_json],
+        ).map_err(|error|error.to_string())?;
+        changed += 1;
+    }
     for (document_id, title, text, current_type) in docs.iter().take(resource_limit as usize) {
         let haystack = if manifest.capabilities.iter().any(|x| x == "read_text") {
             format!("{title} {text}").to_lowercase()
@@ -4534,6 +4721,9 @@ fn run_plugin(app: tauri::AppHandle, id: String) -> Result<PluginRunResult, Stri
             title.to_lowercase()
         };
         for action in &manifest.actions {
+            if action.action_type == "emit_adapter_artifact" {
+                continue;
+            }
             if !haystack.contains(&action.match_text.to_lowercase()) {
                 continue;
             }
@@ -13541,6 +13731,8 @@ pub fn run() {
             list_private_document_ids,
             set_document_private,
             open_private_document_file,
+            list_local_notifications,
+            update_local_notification,
             list_plugins,
             install_plugin,
             set_plugin_enabled,
@@ -13623,7 +13815,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let status = initialize_vault_at(temp_dir.path()).expect("vault initialization");
 
-        assert_eq!(status.schema_version, 31);
+        assert_eq!(status.schema_version, 32);
         assert_eq!(status.testlab_document_count, 57);
         assert!(status.production_vault_ready);
         assert!(PathBuf::from(status.database_path).exists());

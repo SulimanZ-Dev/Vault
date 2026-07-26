@@ -290,6 +290,7 @@ type DuplicateCandidate = {primary_document_id:number;primary_title:string;secon
 type IntegrityScanReport = {checked_files:number;intact_files:number;missing_files:number;changed_files:number;duplicate_groups:number;candidates:DuplicateCandidate[];warnings:string[]}
 type PluginSummary={id:string;name:string;version:string;description:string;capabilities:string[];data_access:string[];enabled:boolean;approved:boolean;last_run_at:string|null;last_result:string|null;api_version:string;adapter_kind:string;manifest_sha256:string;signature_status:string;resource_limit:number}
 type PluginRunResult={plugin_id:string;scanned_documents:number;changed_documents:number;explanation:string}
+type LocalNotification={id:number;severity:'info'|'warning'|'urgent';category:string;title:string;body:string;document_id:number|null;due_date:string|null;read_at:string|null;created_at:string}
 type ExternalImportSource={provider:string;display_name:string;enabled:boolean;approved:boolean;local_staging_path:string|null;last_preview_at:string|null;last_import_at:string|null;last_result:string|null}
 type ExternalImportFile={path:string;relative_path:string;size_bytes:number}
 type ExternalImportPreview={provider:string;files:ExternalImportFile[];skipped_count:number;total_size_bytes:number}
@@ -425,6 +426,7 @@ type ActiveView =
   | 'actuality'
   | 'conflicts'
   | 'reminders'
+  | 'notifications'
   | 'automation'
   | 'importhistory'
   | 'rules'
@@ -632,6 +634,7 @@ function App() {
   const [plugins,setPlugins]=useState<PluginSummary[]>([])
   const [pluginRun,setPluginRun]=useState<PluginRunResult|null>(null)
   const [pluginError,setPluginError]=useState<string|null>(null)
+  const [localNotifications,setLocalNotifications]=useState<LocalNotification[]>([])
   const [externalImportSources,setExternalImportSources]=useState<ExternalImportSource[]>([])
   const [externalImportPreview,setExternalImportPreview]=useState<ExternalImportPreview|null>(null)
   const [externalImportSelection,setExternalImportSelection]=useState<string[]>([])
@@ -875,6 +878,7 @@ function App() {
     invoke<number[]>('list_locked_document_ids').then(setLockedDocumentIds).catch(()=>setLockedDocumentIds([]))
     invoke<number[]>('list_private_document_ids').then(setPrivateDocumentIds).catch(()=>setPrivateDocumentIds([]))
     invoke<PluginSummary[]>('list_plugins').then(setPlugins).catch(()=>setPlugins([]))
+    invoke<LocalNotification[]>('list_local_notifications').then(setLocalNotifications).catch(()=>setLocalNotifications([]))
     invoke<ExternalImportSource[]>('list_external_import_sources').then(setExternalImportSources).catch(()=>setExternalImportSources([]))
     invoke<ThemeProfile[]>('list_theme_profiles').then(setThemeProfiles).catch(()=>setThemeProfiles([]))
     invoke<number[]>('list_favorite_document_ids').then(setFavoriteDocumentIds).catch(()=>setFavoriteDocumentIds([]))
@@ -1381,6 +1385,7 @@ function App() {
   async function handleSetPluginEnabled(plugin:PluginSummary){setPluginError(null);try{setPlugins(await invoke('set_plugin_enabled',{id:plugin.id,enabled:!plugin.enabled}))}catch(error){setPluginError(String(error))}}
   async function handleRunPlugin(plugin:PluginSummary){setPluginError(null);try{setPluginRun(await invoke('run_plugin',{id:plugin.id}));setPlugins(await invoke('list_plugins'));setProductionDocuments(await invoke('list_production_documents'))}catch(error){setPluginError(String(error))}}
   async function handleRemovePlugin(plugin:PluginSummary){if(!window.confirm(`Ta bort plugin ${plugin.name}? Dokumentändringar som redan godkänts behålls.`))return;setPluginError(null);try{setPlugins(await invoke('remove_plugin',{id:plugin.id}))}catch(error){setPluginError(String(error))}}
+  async function handleNotification(id:number,dismiss:boolean){setLocalNotifications(await invoke('update_local_notification',{id,dismiss}));}
   async function handleConfigureExternalImport(source:ExternalImportSource){const selected=await open({directory:true,multiple:false,title:`Välj lokal export-/synkmapp för ${source.display_name}`});if(typeof selected!=='string')return;setPluginError(null);try{setExternalImportSources(await invoke('configure_external_import_source',{provider:source.provider,localStagingPath:selected,enabled:true}));setExternalImportPreview(null);setExternalImportSelection([])}catch(error){setPluginError(String(error))}}
   async function handlePreviewExternalImport(source:ExternalImportSource){setPluginError(null);try{const preview=await invoke<ExternalImportPreview>('preview_external_import',{provider:source.provider});setExternalImportPreview(preview);setExternalImportSelection(preview.files.map(file=>file.path))}catch(error){setPluginError(String(error))}}
   async function handleImportExternalSelection(){if(!externalImportPreview||!externalImportSelection.length)return;if(!window.confirm(`Importera ${externalImportSelection.length} exakt valda filer från ${externalImportPreview.provider}?`))return;setPluginError(null);try{const result=await invoke<DirectoryImportResult>('import_external_selection',{provider:externalImportPreview.provider,paths:externalImportSelection});setPluginError(`Import klar: ${result.imported_count} importerade, ${result.duplicate_count} dubletter, ${result.failed_count} fel.`);setProductionDocuments(await invoke('list_production_documents'));setExternalImportSources(await invoke('list_external_import_sources'))}catch(error){setPluginError(String(error))}}
@@ -2001,6 +2006,7 @@ function App() {
             ['actuality', 'Aktualitet'],
             ['conflicts', 'Konflikter (' + conflicts.filter((conflict) => conflict.status === 'open').length + ')'],
             ['reminders', 'Påminnelser (' + reminders.filter((reminder) => reminder.status === 'active').length + ')'],
+            ['notifications', 'Notiser (' + localNotifications.filter(item=>!item.read_at).length + ')'],
             ['automation', 'Bevakade mappar (' + watchedFolders.length + ')'],
             ['importhistory', 'Importhistorik (' + importHistory.length + ')'],
             ['rules', 'Regler och mallar (' + automationRules.length + ')'],
@@ -2379,6 +2385,8 @@ function App() {
                         ? 'Konflikter'
                         : activeView === 'reminders'
                           ? 'Påminnelser'
+                          : activeView === 'notifications'
+                            ? 'Lokala notiser'
                           : activeView === 'automation'
                             ? 'Bevakade mappar'
                             : activeView === 'importhistory'
@@ -2817,6 +2825,8 @@ function App() {
                 </div>
               </div>
             ) : null}
+
+            {activeView==='notifications'?<div className="test-center-layout"><section className="work-item form-stack"><strong>Notiser stannar på datorn</strong><p>Vault skapar lokala notiser för utgående giltighet, granskningskö och misslyckade jobb. Ingen data eller notis skickas till en extern tjänst.</p><button className="secondary-action" onClick={()=>invoke<LocalNotification[]>('list_local_notifications').then(setLocalNotifications)} type="button">Uppdatera notiser</button></section><section className="work-panel-grid">{localNotifications.map(item=><article className={`work-item notification-${item.severity}`} key={item.id}><strong>{item.title}</strong><span>{item.body}</span><small>{item.category}{item.due_date?` · senast ${item.due_date}`:''}</small><div className="claim-actions">{!item.read_at?<button className="mini-action" onClick={()=>handleNotification(item.id,false)} type="button">Markera läst</button>:null}<button className="mini-action" onClick={()=>handleNotification(item.id,true)} type="button">Avfärda</button>{item.document_id?<button className="mini-action" onClick={()=>{setSelectedIndex(Math.max(0,productionDocuments.findIndex(document=>document.id===item.document_id)));setActiveView('documents')}} type="button">Öppna dokument</button>:null}</div></article>)}{!localNotifications.length?<div className="empty-state">Inga aktiva notiser.</div>:null}</section></div>:null}
 
             {activeView==='integrity'?<div className="test-center-layout"><section className="work-item form-stack"><strong>Filintegritet och dubbletter</strong><p>Kontrollerar SHA-256 och hittar exakta filer, nästan identisk text, korsformat, dubbla sidor och liknande skanningar med perceptuell bildhash. Ingenting raderas automatiskt.</p><button className="primary-action" onClick={handleIntegrityScan} type="button">Kör full kontroll</button>{integrityReport?<div className="diagnostic-grid"><span>{integrityReport.checked_files} kontrollerade</span><span>{integrityReport.intact_files} intakta</span><span>{integrityReport.missing_files} saknas</span><span>{integrityReport.changed_files} ändrade</span><span>{integrityReport.duplicate_groups} förslag</span></div>:null}{healthError?<p className="inline-error">{healthError}</p>:null}</section><section className="work-panel-grid">{integrityReport?.candidates.map(candidate=><article className="work-item" key={`${candidate.primary_document_id}-${candidate.secondary_document_id}`}><strong>{candidate.primary_title}</strong><span>jämförd med {candidate.secondary_title}</span><code>{candidate.confidence}% · {candidate.match_kind}</code><p>{candidate.explanation}</p><div className="claim-actions"><button className="mini-action" onClick={()=>handleDuplicateDecision(candidate,'primary_selected')}>Välj första som primär</button><button className="mini-action" onClick={()=>handleDuplicateDecision(candidate,'keep_both')}>Behåll båda</button><button className="mini-action" onClick={()=>handleDuplicateDecision(candidate,'not_duplicate')}>Inte dubblett</button></div>{candidate.decision?<small>Beslut: {candidate.decision}</small>:null}</article>)}{integrityReport&&!integrityReport.candidates.length?<div className="empty-state">Inga dubblettkandidater hittades.</div>:null}</section></div>:null}
 

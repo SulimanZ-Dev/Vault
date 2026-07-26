@@ -1,0 +1,11 @@
+ALTER TABLE theme_profiles ADD COLUMN shadow_strength REAL NOT NULL DEFAULT 0.25;
+ALTER TABLE theme_profiles ADD COLUMN transparency REAL NOT NULL DEFAULT 1.0;
+ALTER TABLE theme_profiles ADD COLUMN blur_px INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE theme_profiles ADD COLUMN font_family TEXT NOT NULL DEFAULT 'system';
+ALTER TABLE theme_profiles ADD COLUMN line_height REAL NOT NULL DEFAULT 1.45;
+ALTER TABLE theme_profiles ADD COLUMN animation_speed REAL NOT NULL DEFAULT 1.0;
+ALTER TABLE theme_profiles ADD COLUMN preview_ratio TEXT NOT NULL DEFAULT 'document';
+ALTER TABLE theme_profiles ADD COLUMN background_image TEXT NOT NULL DEFAULT '';
+ALTER TABLE theme_profiles ADD COLUMN schedule_mode TEXT NOT NULL DEFAULT 'manual';
+ALTER TABLE theme_profiles ADD COLUMN follow_windows INTEGER NOT NULL DEFAULT 0 CHECK(follow_windows IN(0,1));
+PRAGMA user_version = 31;

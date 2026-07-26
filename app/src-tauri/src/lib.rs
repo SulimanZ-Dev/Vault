@@ -49,6 +49,7 @@ const VIEWER_COORDINATES_MIGRATION: &str =
 const JOBS_RULES_BATCH_MIGRATION: &str = include_str!("../migrations/0029_jobs_rules_batch.sql");
 const PLUGIN_ADAPTERS_IMPORTERS_MIGRATION: &str =
     include_str!("../migrations/0030_plugin_adapters_importers.sql");
+const ADVANCED_THEMES_MIGRATION: &str = include_str!("../migrations/0031_advanced_themes.sql");
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (1, "initial local vault schema", INITIAL_MIGRATION),
     (
@@ -148,6 +149,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "versioned plugin adapters and external import sources",
         PLUGIN_ADAPTERS_IMPORTERS_MIGRATION,
     ),
+    (31, "advanced theme profiles", ADVANCED_THEMES_MIGRATION),
 ];
 
 #[derive(Serialize)]
@@ -969,6 +971,47 @@ struct ThemeProfile {
     is_builtin: bool,
     is_active: bool,
     version: i64,
+    #[serde(default = "default_shadow_strength")]
+    shadow_strength: f64,
+    #[serde(default = "default_transparency")]
+    transparency: f64,
+    #[serde(default)]
+    blur_px: i64,
+    #[serde(default = "default_font_family")]
+    font_family: String,
+    #[serde(default = "default_line_height")]
+    line_height: f64,
+    #[serde(default = "default_animation_speed")]
+    animation_speed: f64,
+    #[serde(default = "default_preview_ratio")]
+    preview_ratio: String,
+    #[serde(default)]
+    background_image: String,
+    #[serde(default = "default_schedule_mode")]
+    schedule_mode: String,
+    #[serde(default)]
+    follow_windows: bool,
+}
+fn default_shadow_strength() -> f64 {
+    0.25
+}
+fn default_transparency() -> f64 {
+    1.0
+}
+fn default_font_family() -> String {
+    "system".into()
+}
+fn default_line_height() -> f64 {
+    1.45
+}
+fn default_animation_speed() -> f64 {
+    1.0
+}
+fn default_preview_ratio() -> String {
+    "document".into()
+}
+fn default_schedule_mode() -> String {
+    "manual".into()
 }
 
 #[derive(Serialize)]
@@ -4222,13 +4265,23 @@ fn read_theme(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThemeProfile> {
         is_builtin: row.get::<_, i64>(14)? != 0,
         is_active: row.get::<_, i64>(15)? != 0,
         version: row.get(16)?,
+        shadow_strength: row.get(17)?,
+        transparency: row.get(18)?,
+        blur_px: row.get(19)?,
+        font_family: row.get(20)?,
+        line_height: row.get(21)?,
+        animation_speed: row.get(22)?,
+        preview_ratio: row.get(23)?,
+        background_image: row.get(24)?,
+        schedule_mode: row.get(25)?,
+        follow_windows: row.get::<_, i64>(26)? != 0,
     })
 }
 
 #[tauri::command]
 fn list_theme_profiles(app: tauri::AppHandle) -> Result<Vec<ThemeProfile>, String> {
     let c = production_connection(&app)?;
-    let mut s=c.prepare("SELECT id,name,base_mode,accent,surface_main,surface_sidebar,surface_raised,text_primary,text_secondary,border_color,radius_px,font_scale,density,motion,is_builtin,is_active,version FROM theme_profiles ORDER BY is_active DESC,is_builtin DESC,name").map_err(|e|e.to_string())?;
+    let mut s=c.prepare("SELECT id,name,base_mode,accent,surface_main,surface_sidebar,surface_raised,text_primary,text_secondary,border_color,radius_px,font_scale,density,motion,is_builtin,is_active,version,shadow_strength,transparency,blur_px,font_family,line_height,animation_speed,preview_ratio,background_image,schedule_mode,follow_windows FROM theme_profiles ORDER BY is_active DESC,is_builtin DESC,name").map_err(|e|e.to_string())?;
     let rows = s
         .query_map([], read_theme)
         .map_err(|e| e.to_string())?
@@ -4279,6 +4332,16 @@ fn save_theme_profile(
     font_scale: f64,
     density: String,
     motion: String,
+    shadow_strength: f64,
+    transparency: f64,
+    blur_px: i64,
+    font_family: String,
+    line_height: f64,
+    animation_speed: f64,
+    preview_ratio: String,
+    background_image: String,
+    schedule_mode: String,
+    follow_windows: bool,
 ) -> Result<Vec<ThemeProfile>, String> {
     validate_theme_values(
         &name,
@@ -4306,7 +4369,13 @@ fn save_theme_profile(
     if builtin > 0 {
         return Err("Ett inbyggt tema kan inte skrivas över; välj ett nytt namn".into());
     }
-    c.execute("INSERT INTO theme_profiles(name,base_mode,accent,surface_main,surface_sidebar,surface_raised,text_primary,text_secondary,border_color,radius_px,font_scale,density,motion,is_builtin,is_active) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,0) ON CONFLICT(name) DO UPDATE SET base_mode=excluded.base_mode,accent=excluded.accent,surface_main=excluded.surface_main,surface_sidebar=excluded.surface_sidebar,surface_raised=excluded.surface_raised,text_primary=excluded.text_primary,text_secondary=excluded.text_secondary,border_color=excluded.border_color,radius_px=excluded.radius_px,font_scale=excluded.font_scale,density=excluded.density,motion=excluded.motion,version=theme_profiles.version+1,updated_at=CURRENT_TIMESTAMP WHERE theme_profiles.is_builtin=0",params![name.trim(),base_mode,accent,surface_main,surface_sidebar,surface_raised,text_primary,text_secondary,border_color,radius_px.clamp(0,30),font_scale.clamp(0.8,1.4),density,motion]).map_err(|e|e.to_string())?;
+    if !["system", "serif", "mono"].contains(&font_family.as_str())
+        || !["document", "square", "wide"].contains(&preview_ratio.as_str())
+        || !["manual", "day_night", "windows"].contains(&schedule_mode.as_str())
+    {
+        return Err("Ogiltig avancerad temainställning".into());
+    }
+    c.execute("INSERT INTO theme_profiles(name,base_mode,accent,surface_main,surface_sidebar,surface_raised,text_primary,text_secondary,border_color,radius_px,font_scale,density,motion,is_builtin,is_active,shadow_strength,transparency,blur_px,font_family,line_height,animation_speed,preview_ratio,background_image,schedule_mode,follow_windows) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,0,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) ON CONFLICT(name) DO UPDATE SET base_mode=excluded.base_mode,accent=excluded.accent,surface_main=excluded.surface_main,surface_sidebar=excluded.surface_sidebar,surface_raised=excluded.surface_raised,text_primary=excluded.text_primary,text_secondary=excluded.text_secondary,border_color=excluded.border_color,radius_px=excluded.radius_px,font_scale=excluded.font_scale,density=excluded.density,motion=excluded.motion,shadow_strength=excluded.shadow_strength,transparency=excluded.transparency,blur_px=excluded.blur_px,font_family=excluded.font_family,line_height=excluded.line_height,animation_speed=excluded.animation_speed,preview_ratio=excluded.preview_ratio,background_image=excluded.background_image,schedule_mode=excluded.schedule_mode,follow_windows=excluded.follow_windows,version=theme_profiles.version+1,updated_at=CURRENT_TIMESTAMP WHERE theme_profiles.is_builtin=0",params![name.trim(),base_mode,accent,surface_main,surface_sidebar,surface_raised,text_primary,text_secondary,border_color,radius_px.clamp(0,30),font_scale.clamp(0.8,1.4),density,motion,shadow_strength.clamp(0.0,1.0),transparency.clamp(0.55,1.0),blur_px.clamp(0,30),font_family,line_height.clamp(1.0,2.2),animation_speed.clamp(0.25,2.0),preview_ratio,background_image.chars().take(4096).collect::<String>(),schedule_mode,i64::from(follow_windows)]).map_err(|e|e.to_string())?;
     record_audit_event(
         &c,
         "theme_saved",
@@ -4350,7 +4419,7 @@ fn duplicate_theme_profile(
     if name.trim().is_empty() {
         return Err("Ange namn på kopian".into());
     }
-    c.execute("INSERT INTO theme_profiles(name,base_mode,accent,surface_main,surface_sidebar,surface_raised,text_primary,text_secondary,border_color,radius_px,font_scale,density,motion,is_builtin,is_active) SELECT ?1,base_mode,accent,surface_main,surface_sidebar,surface_raised,text_primary,text_secondary,border_color,radius_px,font_scale,density,motion,0,0 FROM theme_profiles WHERE id=?2",params![name.trim(),id]).map_err(|e|e.to_string())?;
+    c.execute("INSERT INTO theme_profiles(name,base_mode,accent,surface_main,surface_sidebar,surface_raised,text_primary,text_secondary,border_color,radius_px,font_scale,density,motion,is_builtin,is_active,shadow_strength,transparency,blur_px,font_family,line_height,animation_speed,preview_ratio,background_image,schedule_mode,follow_windows) SELECT ?1,base_mode,accent,surface_main,surface_sidebar,surface_raised,text_primary,text_secondary,border_color,radius_px,font_scale,density,motion,0,0,shadow_strength,transparency,blur_px,font_family,line_height,animation_speed,preview_ratio,background_image,schedule_mode,follow_windows FROM theme_profiles WHERE id=?2",params![name.trim(),id]).map_err(|e|e.to_string())?;
     drop(c);
     list_theme_profiles(app)
 }
@@ -4408,6 +4477,16 @@ fn import_theme_profile(app: tauri::AppHandle, path: String) -> Result<Vec<Theme
         theme.font_scale,
         theme.density,
         theme.motion,
+        theme.shadow_strength,
+        theme.transparency,
+        theme.blur_px,
+        theme.font_family,
+        theme.line_height,
+        theme.animation_speed,
+        theme.preview_ratio,
+        theme.background_image,
+        theme.schedule_mode,
+        theme.follow_windows,
     )
 }
 
@@ -12863,7 +12942,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let status = initialize_vault_at(temp_dir.path()).expect("vault initialization");
 
-        assert_eq!(status.schema_version, 30);
+        assert_eq!(status.schema_version, 31);
         assert_eq!(status.testlab_document_count, 4);
         assert!(status.production_vault_ready);
         assert!(PathBuf::from(status.database_path).exists());

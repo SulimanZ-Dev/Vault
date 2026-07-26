@@ -2390,6 +2390,10 @@ fn rebuild_domain_records(connection: &Connection) -> rusqlite::Result<()> {
         let normalized_type = normalize(&document_type);
         let (domain_type, record_type) = if normalized_type.contains("anstallningsavtal") {
             ("employment", "employment_agreement")
+        } else if normalized_type.contains("tillaggsavtal")
+            || normalized_type.contains("andringsavtal")
+        {
+            ("employment", "supplementary_agreement")
         } else if normalized_type.contains("lonespecifikation") {
             ("employment", "salary_period")
         } else if normalized_type.contains("utbild")
@@ -2401,7 +2405,6 @@ fn rebuild_domain_records(connection: &Connection) -> rusqlite::Result<()> {
         } else if normalized_type.contains("hyres")
             || normalized_type.contains("bostad")
             || normalized_type.contains("boende")
-            || normalized_type.contains("besiktningsprotokoll")
         {
             ("housing", "housing_record")
         } else if normalized_type.contains("resa")
@@ -2425,13 +2428,17 @@ fn rebuild_domain_records(connection: &Connection) -> rusqlite::Result<()> {
             ("vehicle", "vehicle_document")
         } else if normalized_type.contains("identitet") || normalized_type.contains("pass") {
             ("identity", "identity_document")
+        } else if normalized_type.contains("garanti")
+            || normalized_type.contains("produkt")
+            || normalized_type.contains("kvitto")
+            || normalized_type.contains("faktura")
+        {
+            ("product", "purchase_record")
         } else if normalized_type.contains("avtal")
             || normalized_type.contains("forsakring")
             || normalized_type.contains("abonnemang")
         {
             ("contract", "agreement")
-        } else if normalized_type.contains("kvitto") || normalized_type.contains("faktura") {
-            ("product", "purchase_record")
         } else {
             continue;
         };
@@ -2450,7 +2457,10 @@ fn rebuild_domain_records(connection: &Connection) -> rusqlite::Result<()> {
         .or_else(|| {
             matches!(
                 record_type,
-                "salary_period" | "purchase_record" | "identity_document"
+                "salary_period"
+                    | "purchase_record"
+                    | "identity_document"
+                    | "supplementary_agreement"
             )
             .then(|| document_date.clone())
             .flatten()
@@ -2517,6 +2527,223 @@ fn rebuild_domain_records(connection: &Connection) -> rusqlite::Result<()> {
              ON CONFLICT(document_id, domain_type, record_type) DO UPDATE SET subject=excluded.subject, effective_from=excluded.effective_from, effective_to=excluded.effective_to, actuality_status=CASE WHEN domain_records.manually_locked=1 THEN domain_records.actuality_status ELSE excluded.actuality_status END, actuality_explanation=CASE WHEN domain_records.manually_locked=1 THEN domain_records.actuality_explanation ELSE excluded.actuality_explanation END, fields_json=excluded.fields_json, source_page_no=excluded.source_page_no, updated_at=CURRENT_TIMESTAMP",
             params![document_id, domain_type, record_type, subject, effective_from, effective_to, actuality_status, explanation, fields_json, source_page_no],
         )?;
+    }
+    rebuild_deep_domain_models(connection)?;
+    Ok(())
+}
+
+fn domain_field(fields_json: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(fields_json)
+        .ok()?
+        .get("fields")?
+        .get(key)?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn numeric_domain_value(value: Option<String>) -> Option<f64> {
+    let value = value?.replace('\u{00a0}', " ");
+    let number = value
+        .chars()
+        .skip_while(|character| !character.is_ascii_digit())
+        .take_while(|character| character.is_ascii_digit() || matches!(character, ' ' | '.' | ','))
+        .collect::<String>()
+        .trim()
+        .replace(' ', "");
+    if number.is_empty() {
+        return None;
+    }
+    let number = if number.contains(',') {
+        number.replace('.', "").replace(',', ".")
+    } else {
+        number
+    };
+    number.parse().ok()
+}
+
+fn rebuild_deep_domain_models(connection: &Connection) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT document_id,domain_type,record_type,effective_from,effective_to,actuality_status,fields_json
+         FROM domain_records WHERE vault_id=1",
+    )?;
+    let records = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for (
+        document_id,
+        domain_type,
+        record_type,
+        effective_from,
+        effective_to,
+        actuality_status,
+        fields_json,
+    ) in records
+    {
+        match domain_type.as_str() {
+            "identity" => {
+                let status = if actuality_status == "historical" {
+                    "expired"
+                } else if actuality_status == "future" {
+                    "future"
+                } else {
+                    "active"
+                };
+                connection.execute(
+                    "INSERT INTO identity_records(document_id,identity_type,document_number,surname,given_names,nationality,personal_number,issue_date,expiry_date,status)
+                     VALUES(?1,'passport',?2,?3,?4,?5,?6,?7,?8,?9)
+                     ON CONFLICT(document_id) DO UPDATE SET document_number=excluded.document_number,surname=excluded.surname,given_names=excluded.given_names,nationality=excluded.nationality,personal_number=excluded.personal_number,issue_date=excluded.issue_date,expiry_date=excluded.expiry_date,status=CASE WHEN identity_records.is_locked=1 THEN identity_records.status ELSE excluded.status END,updated_at=CURRENT_TIMESTAMP",
+                    params![document_id,domain_field(&fields_json,"document_number"),domain_field(&fields_json,"surname"),domain_field(&fields_json,"given_names"),domain_field(&fields_json,"nationality"),domain_field(&fields_json,"personal_number"),effective_from,effective_to,status],
+                )?;
+            }
+            "vehicle" => {
+                connection.execute(
+                    "INSERT INTO vehicle_records(document_id,registration_number,vin,make,model,model_year)
+                     VALUES(?1,?2,?3,?4,?5,?6)
+                     ON CONFLICT(document_id) DO UPDATE SET registration_number=excluded.registration_number,vin=excluded.vin,make=excluded.make,model=excluded.model,model_year=excluded.model_year,updated_at=CURRENT_TIMESTAMP",
+                    params![document_id,domain_field(&fields_json,"registration_number"),domain_field(&fields_json,"vin"),domain_field(&fields_json,"make"),domain_field(&fields_json,"model"),numeric_domain_value(domain_field(&fields_json,"model_year")).map(|value|value as i64)],
+                )?;
+                if record_type == "vehicle_document"
+                    && (domain_field(&fields_json, "mileage").is_some()
+                        || domain_field(&fields_json, "workshop").is_some())
+                {
+                    let vehicle_id: i64 = connection.query_row(
+                        "SELECT id FROM vehicle_records WHERE document_id=?1",
+                        [document_id],
+                        |row| row.get(0),
+                    )?;
+                    connection.execute(
+                        "INSERT INTO service_records(vehicle_record_id,document_id,service_date,mileage,workshop_name,service_category,next_recommended_service)
+                         VALUES(?1,?2,COALESCE(?3,date('now','localtime')),?4,?5,?6,?7)
+                         ON CONFLICT(vehicle_record_id,service_date,workshop_name) DO UPDATE SET mileage=excluded.mileage,service_category=excluded.service_category,next_recommended_service=excluded.next_recommended_service",
+                        params![vehicle_id,document_id,effective_from,numeric_domain_value(domain_field(&fields_json,"mileage")).map(|value|value as i64),domain_field(&fields_json,"workshop").unwrap_or_else(||"Okänd verkstad".into()),domain_field(&fields_json,"service_category"),domain_field(&fields_json,"next_service")],
+                    )?;
+                }
+            }
+            "employment" if record_type == "employment_agreement" => {
+                if let Some(employer) = domain_field(&fields_json, "employer") {
+                    let status = if actuality_status == "future" {
+                        "future"
+                    } else if actuality_status == "historical" {
+                        "ended"
+                    } else {
+                        "active"
+                    };
+                    connection.execute(
+                        "INSERT INTO employment_records(document_id,employer_name,employer_alias,organization_number,position,start_date,end_date,employment_rate,status)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                         ON CONFLICT(document_id) DO UPDATE SET employer_name=excluded.employer_name,employer_alias=excluded.employer_alias,organization_number=excluded.organization_number,position=excluded.position,start_date=excluded.start_date,end_date=excluded.end_date,employment_rate=excluded.employment_rate,status=CASE WHEN employment_records.is_locked=1 THEN employment_records.status ELSE excluded.status END,updated_at=CURRENT_TIMESTAMP",
+                        params![document_id,employer,domain_field(&fields_json,"employer_alias"),domain_field(&fields_json,"organization_number"),domain_field(&fields_json,"position"),effective_from,effective_to,numeric_domain_value(domain_field(&fields_json,"employment_rate")),status],
+                    )?;
+                    let employment_id: i64 = connection.query_row(
+                        "SELECT id FROM employment_records WHERE document_id=?1",
+                        [document_id],
+                        |row| row.get(0),
+                    )?;
+                    for (salary_type, key) in
+                        [("monthly", "monthly_salary"), ("hourly", "hourly_salary")]
+                    {
+                        if let Some(amount) = numeric_domain_value(domain_field(&fields_json, key))
+                        {
+                            connection.execute(
+                                "INSERT INTO salary_records(employment_record_id,document_id,salary_type,amount,effective_from,is_current)
+                                 VALUES(?1,?2,?3,?4,COALESCE(?5,date('now','localtime')),1)
+                                 ON CONFLICT(employment_record_id,effective_from) DO UPDATE SET salary_type=excluded.salary_type,amount=excluded.amount,document_id=excluded.document_id",
+                                params![employment_id,document_id,salary_type,amount,effective_from],
+                            )?;
+                        }
+                    }
+                }
+            }
+            "employment" if record_type == "supplementary_agreement" => {
+                let employer = domain_field(&fields_json, "employer");
+                let employment_id = if let Some(employer_name) = employer {
+                    connection
+                        .query_row(
+                            "SELECT id FROM employment_records
+                             WHERE lower(employer_name)=lower(?1)
+                             ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'future' THEN 1 ELSE 2 END, start_date DESC
+                             LIMIT 1",
+                            [employer_name],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()?
+                } else {
+                    connection
+                        .query_row(
+                            "SELECT id FROM employment_records
+                             ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'future' THEN 1 ELSE 2 END, start_date DESC
+                             LIMIT 1",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()?
+                };
+                if let Some(employment_id) = employment_id {
+                    let agreement_date = effective_from
+                        .clone()
+                        .or_else(|| domain_field(&fields_json, "agreement_date"))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    connection.execute(
+                        "INSERT INTO supplementary_agreements(employment_record_id,document_id,agreement_date,changes_json)
+                         VALUES(?1,?2,?3,?4)
+                         ON CONFLICT(employment_record_id,agreement_date) DO UPDATE SET document_id=excluded.document_id,changes_json=excluded.changes_json",
+                        params![employment_id, document_id, agreement_date, fields_json],
+                    )?;
+                    for (salary_type, key) in
+                        [("monthly", "monthly_salary"), ("hourly", "hourly_salary")]
+                    {
+                        if let Some(amount) = numeric_domain_value(domain_field(&fields_json, key))
+                        {
+                            connection.execute(
+                                "UPDATE salary_records SET is_current=0,effective_to=?2
+                                 WHERE employment_record_id=?1 AND is_current=1",
+                                params![employment_id, agreement_date],
+                            )?;
+                            connection.execute(
+                                "INSERT INTO salary_records(employment_record_id,document_id,salary_type,amount,effective_from,is_current)
+                                 VALUES(?1,?2,?3,?4,?5,1)
+                                 ON CONFLICT(employment_record_id,effective_from) DO UPDATE SET salary_type=excluded.salary_type,amount=excluded.amount,document_id=excluded.document_id,is_current=1",
+                                params![employment_id,document_id,salary_type,amount,agreement_date],
+                            )?;
+                        }
+                    }
+                }
+            }
+            "product" => {
+                if let Some(product) = domain_field(&fields_json, "product_name") {
+                    let warranty_days =
+                        numeric_domain_value(domain_field(&fields_json, "warranty_period")).map(
+                            |value| {
+                                if value < 100.0 {
+                                    (value * 30.0) as i64
+                                } else {
+                                    value as i64
+                                }
+                            },
+                        );
+                    connection.execute(
+                        "INSERT INTO warranty_records(document_id,product_name,model,serial_number,purchase_date,store_name,warranty_period_days,manual_end_date,complaint_info,status)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                         ON CONFLICT(document_id) DO UPDATE SET product_name=excluded.product_name,model=excluded.model,serial_number=excluded.serial_number,purchase_date=excluded.purchase_date,store_name=excluded.store_name,warranty_period_days=excluded.warranty_period_days,manual_end_date=excluded.manual_end_date,complaint_info=excluded.complaint_info,status=excluded.status,updated_at=CURRENT_TIMESTAMP",
+                        params![document_id,product,domain_field(&fields_json,"model"),domain_field(&fields_json,"serial_number"),domain_field(&fields_json,"purchase_date").or(effective_from),domain_field(&fields_json,"store"),warranty_days,domain_field(&fields_json,"warranty_end"),domain_field(&fields_json,"complaint"),if actuality_status=="historical"{"expired"}else{"active"}],
+                    )?;
+                }
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -2589,7 +2816,9 @@ fn extract_domain_fields(domain_type: &str, text: &str) -> serde_json::Value {
             ("employment_type", "anstallningsform"),
             ("employment_rate", "sysselsattningsgrad"),
             ("monthly_salary", "manadslon"),
+            ("monthly_salary", "avtalad manadslon"),
             ("hourly_salary", "timlon"),
+            ("hourly_salary", "avtalad timlon"),
             ("supplementary_agreement", "tillaggsavtal"),
         ],
         "product" => &[
@@ -13875,6 +14104,13 @@ mod tests {
             .expect("salary record");
         assert_eq!(salary.actuality_status, "historical_record");
         assert!(salary.fields_json.contains("money_amount"));
+        let connection = Connection::open(temp_dir.path().join("vault.db")).expect("database");
+        let employment_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM employment_records", [], |row| {
+                row.get(0)
+            })
+            .expect("employment count");
+        assert_eq!(employment_count, 1);
     }
 
     #[test]
@@ -14120,6 +14356,18 @@ fn extracts_extended_domain_fields_without_inference() {
     );
     assert_eq!(employment["employer"], "DAGAB AB");
     assert_eq!(employment["employment_rate"], "100 %");
+}
+
+#[test]
+fn parses_first_domain_number_without_merging_later_dates() {
+    assert_eq!(
+        numeric_domain_value(Some("198 SEK från 2025-01-01, tidigare 184".into())),
+        Some(198.0)
+    );
+    assert_eq!(
+        numeric_domain_value(Some("32 000,50 SEK per månad".into())),
+        Some(32_000.50)
+    );
 }
 
 #[test]
